@@ -1,0 +1,2 @@
+# risetek.lq
+Light Quic
