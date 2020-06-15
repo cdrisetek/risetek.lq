@@ -11,13 +11,15 @@
 #define FMT_PN         "%llu"
 #define FMT_SID        "%03d"
 
-#if 0
-#define LQ_DEBUG_PKT(fmt, args...)
-#else
+#define MAINDEBUG 1
+
+#if MAINDEBUG
 #define LQ_DEBUG_PKT(fmt, args...) do{ fprintf(stderr, fmt, ##args); }while(0)
+#else
+#define LQ_DEBUG_PKT(fmt, args...)
 #endif
 
-#if 1
+#if MAINDEBUG
 #define LQ_DEBUG_CORE(fmt, args...) do{ fprintf(stderr, fmt, ##args); }while(0)
 #else
 #define LQ_DEBUG_CORE(fmt, args...)
@@ -25,12 +27,22 @@
 
 #define LQ_DEBUG_ERROR(fmt, args...) do{ fprintf(stderr, fmt, ##args); }while(0)
 
+#if MAINDEBUG
 #define LQ_DEBUG_APPL(fmt, args...) do{ fprintf(stderr, fmt, ##args); }while(0)
+#else
+#define LQ_DEBUG_APPL(fmt, args...)
+#endif
 
-#if 0
+#if MAINDEBUG
 #define LQ_DEBUG_MAIN(fmt, args...) do{ fprintf(stderr, fmt "\r\n", ##args); }while(0)
 #else
 #define LQ_DEBUG_MAIN(fmt, args...)
+#endif
+
+#if 1
+#define LQ_DEBUG_SUMMARY(fmt, args...) do{ fprintf(stderr, fmt, ##args); }while(0)
+#else
+#define LQ_DEBUG_SUMMARY(fmt, args...)
 #endif
 
 #define MARKLINE    fprintf(stderr, "%s %d\r\n", __FUNCTION__, __LINE__);
@@ -46,9 +58,9 @@
 #define STREAM_INGRESS_IMM_ACK         (1 << 5)
 #define STREAM_CORE                    (1 << 7)
 
-#define DEFAULT_RTT_US                 20
+#define DEFAULT_RTT_US                 40
 #define DEFAULT_HEADER_BYTE            0x80
-
+#define DEFAULT_MAX_PENDING_SIZE       (70)
 typedef enum {
     connection_init,
     connection_handshake,
@@ -112,6 +124,14 @@ typedef struct r_stream {
     // 应用层希望在给定时间点产生CONNECT_EVENT_TIMER事件
     TYPE_TIMER_US timer_interesting;
 
+
+    // CC
+    TYPE_STREAM_OFFSET max_pending_size;
+    TYPE_STREAM_OFFSET pending_size;
+
+    // Statistic
+    TYPE_STREAM_OFFSET sended_size;
+    TYPE_STREAM_OFFSET received_size;
 } RSTREAM, *pRSTREAM;
 
 struct r_link;

@@ -70,6 +70,14 @@ TYPE_BUFFER_SIZE lq_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffe
 	pRSTREAM stream = &connection->ingress_streams[id];
 
 	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
+	pRSTREAM_BUFFER pbuffer = *ppbuffer;
+
+	if(stream->offset != pbuffer->offset) {
+		LQ_DEBUG_CORE("[%s] {%s} lq_read failed, available: %llu, request: %llu\r\n",
+				rlink->debug_prompt, rlink->isClient?"Client":"Server",
+				stream->offset, pbuffer->offset);
+		return 0;
+	}
 
 	if(length != (*ppbuffer)->len) {
 		fprintf(stderr, "stream read failed, require %d, available: %d\r\n", length, (*ppbuffer)->len);
@@ -77,8 +85,6 @@ TYPE_BUFFER_SIZE lq_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffe
 	}
 
 	memcpy(buffer, (*ppbuffer)->packet_pos, length);
-
-	pRSTREAM_BUFFER pbuffer = *ppbuffer;
 
 	stream->offset += pbuffer->len;
 	*ppbuffer = (*ppbuffer)->next;
@@ -89,7 +95,6 @@ TYPE_BUFFER_SIZE lq_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffe
 	rlink->free_stream_header = pbuffer;
 
 	stream->avaliable_len -= pbuffer->len;
-
 	return length;
 }
 
@@ -99,6 +104,14 @@ static int stream_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer,
 	pRSTREAM stream = &connection->ingress_streams[id];
 
 	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
+	pRSTREAM_BUFFER pbuffer = *ppbuffer;
+
+	if(stream->offset != pbuffer->offset) {
+		LQ_DEBUG_CORE("[%s] {%s} lq_read failed, available: %llu, request: %llu\r\n",
+				rlink->debug_prompt, rlink->isClient?"Client":"Server",
+				stream->offset, pbuffer->offset);
+		return 0;
+	}
 
 	if(length != (*ppbuffer)->len) {
 		fprintf(stderr, "stream read failed, require %d, available: %d\r\n", length, (*ppbuffer)->len);
@@ -106,8 +119,6 @@ static int stream_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer,
 	}
 
 	memcpy(buffer, (*ppbuffer)->packet_pos, length);
-
-	pRSTREAM_BUFFER pbuffer = *ppbuffer;
 
 	stream->offset += pbuffer->len;
 	*ppbuffer = (*ppbuffer)->next;
@@ -118,7 +129,6 @@ static int stream_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer,
 	rlink->free_stream_header = pbuffer;
 
 	stream->avaliable_len -= pbuffer->len;
-
 	return length;
 }
 
@@ -260,6 +270,13 @@ BOOL connection_is_writeable(pRCONNECTION connection) {
 		return FALSE;
 }
 
+BOOL stream_is_writeable(pRCONNECTION connection, pRSTREAM pstream) {
+	if((connection->rlink->free_stream_header != NULL) && (pstream->pending_size < DEFAULT_MAX_PENDING_SIZE))
+		return TRUE;
+	else
+		return FALSE;
+}
+
 /**
  * 处理各个RSTREAM内部的数据，向上层（应用层）提交接收好的RSTREAM数据
  **/
@@ -278,11 +295,17 @@ static void connection_upstream(pRCONNECTION connection) {
 		// for core stream, always readable
 		if(STREAM_INGRESS_ATTR[loop].type & STREAM_CORE)
 			core_ingress_stream_process(connection, pstream);
-		else if((rlink->link_handler != NULL) && (pstream->interesting_event & CONNECTION_EVENT_READABLE))
+		else if((rlink->link_handler != NULL)
+				&& (pstream->interesting_event & CONNECTION_EVENT_READABLE)
+				&& (pstream->notify_event & CONNECTION_EVENT_READABLE))
 			// TODO: connection state should be idle
 			application_ingress_stream_process(connection, pstream);
 
-		pstream->notify_event = 0;
+		// READ完成后，重新判断stream是否有数据可读
+		if((NULL != pstream->buffer_header) && (pstream->offset == pstream->buffer_header->offset))
+			pstream->notify_event |= CONNECTION_EVENT_READABLE;
+		else
+			pstream->notify_event &= ~CONNECTION_EVENT_READABLE;
     }
 
     // EGRESS process
@@ -308,6 +331,7 @@ static void connection_upstream(pRCONNECTION connection) {
 			core_egress_stream_process(connection, pstream);
 		} else if((rlink->link_handler != NULL)
 				&& (connection->state == connection_idle)
+				&& stream_is_writeable(connection, pstream)
 				&& (pstream->interesting_event & CONNECTION_EVENT_WRITEABLE)) {
 			application_egress_stream_process(connection, pstream, EVENT_ID_WRITEABLE);
 		}
@@ -350,9 +374,7 @@ pRLINK rlink_create(BOOL isClient, pRLINK_ADDR addr) {
     link->connections_mgr.connection_header = NULL;
     link->test_ok = 0;
     link->ticks = 0;
-//    link->last_ticks = link->ticks;
     link->protocol_violate = FALSE;
-
 
     // pRPACKET
     link->free_packets = NULL;
@@ -382,7 +404,7 @@ pRCONNECTION _new_connection(pRLINK link, pRLINK_ADDR addr) {
     RLINK_ADDR_CPY(&connection->peer_addr, addr);
     connection->state = connection_init;
     connection->packet_nb = INIT_PACKET_NUMBER;
-    connection->pn_space.need_ack = FALSE;
+//    connection->pn_space.need_ack = FALSE;
     connection->received_packet_header = NULL;
     connection->rtt = DEFAULT_RTT_US;
     connection->rlink = link;
@@ -399,8 +421,6 @@ pRCONNECTION _new_connection(pRLINK link, pRLINK_ADDR addr) {
         connection->ingress_streams[loop].buffer_header = NULL;
         connection->ingress_streams[loop].offset = 0;
     }
-
-    //link->base_link_id++;
 
     connection->local_cid = link->base_link_id++;
     connection->target_cid = RLINK_CID_NULL;
@@ -473,12 +493,11 @@ static void cleanstream_range_connection(pRCONNECTION connection, TYPE_PACKET_NU
 	 */
     struct ival * b;
 	if(connection->ack_pn <= max && connection->ack_pn >= min) {
-		LQ_DEBUG_CORE("[%s] {%s} <%llu-%llu> ack for ack:", rlink->debug_prompt, rlink->isClient?"Client":"Server", min, max);
+		LQ_DEBUG_CORE("[%s] {%s} <%llu-%llu-%llu> ack for ack:", rlink->debug_prompt, rlink->isClient?"Client":"Server", min, connection->ack_pn, max);
 		diet_foreach_rev (b, diet, &connection->acked) {
-			LQ_DEBUG_CORE(" [%u:%u]", b->hi, b->lo);
+			LQ_DEBUG_CORE(" [%u:%u]", b->lo, b->hi);
 			diet_remove_ival(&connection->pn_space.recv,
-							 &(const struct ival){.lo = b->hi,
-												  .hi = b->lo});
+							 &(const struct ival){.lo = b->lo, .hi = b->hi});
 		}
 		LQ_DEBUG_CORE("\r\n");
 	}
@@ -504,6 +523,8 @@ static void cleanstream_range_connection(pRCONNECTION connection, TYPE_PACKET_NU
                 // 清理获得确认的stream buffer
                 *ppbuffer = (*ppbuffer)->next;
                 // 已经确定被对端接收到的packet所包含的stream buffer归还到可用buffer空间。
+                stream->pending_size -= pbuffer->len;
+
                 pbuffer->packet_nb = MIN_PACKET_NUMBER;
                 pbuffer->next = rlink->free_stream_header;
                 rlink->free_stream_header = pbuffer;
@@ -669,6 +690,7 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 				sb->packet = packet;
 				sb->packet_pos = pos;
 				sb->packet_stream_len = stream_len;
+				pstream->received_size += stream_len;
 				packet->ref++;
 
 				// 计算连续的可用数据长度
@@ -684,12 +706,15 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 				}
 
 				pstream->avaliable_len = offset_tail - pstream->offset;
-				// TODO: 可读时间在有offset的情况下，需要检查空间是否连续。
-				pstream->notify_event |= CONNECTION_EVENT_READABLE;
 				LQ_DEBUG_CORE("[DEBUG:CORE] Stream[" FMT_SID "] readable %08X, received offset: %llu\r\n", pstream->id, pstream->notify_event, offset);
 			}
 			// else LQ_DEBUG_APPL("DUP SET stream %d to readable %08X, received offset: %llu\r\n", pstream->id, pstream->notify_event, offset);
 
+			// 如果buffer的位置与读取的位置相等，说明有数据可读
+			if((NULL != pstream->buffer_header) && (pstream->offset == pstream->buffer_header->offset))
+				pstream->notify_event |= CONNECTION_EVENT_READABLE;
+			else
+				pstream->notify_event &= ~CONNECTION_EVENT_READABLE;
         }
 
 		pos += stream_len;
@@ -701,11 +726,13 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
     }
 
     // 判断是否只有ACK。不应该去回应(ACK)只有ACK的PACKET.
-    if((pn->rx_frm_types & ~(STREAM_INGRESS_IMM_ACK|STREAM_CORE)) != 0)
-    	pn->pkts_rxed_since_last_ack_tx++;
-    else
     // DEBUG Statistics:
+    if((pn->rx_frm_types & ~(STREAM_INGRESS_IMM_ACK|STREAM_CORE)) == 0)
     	connection->received_ackonly++;
+
+    // NOTE: 规范上是不能回应只有ACK的报文，可是如果对端没有别的信息发送而只是接收信息，它就没有机会消化pn_space里面的记录.
+//    else
+    	pn->pkts_rxed_since_last_ack_tx++;
     connection->received_packet++;
 }
 
@@ -715,6 +742,11 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 // TODO: 没有考虑超过一个缓冲区大小的写入
 TYPE_BUFFER_SIZE lq_write(pRCONNECTION connection, TYPE_STREAM_ID id, cyg_uint8 const *val, TYPE_STREAM_LENGTH len) {
 	pRLINK rlink = connection->rlink;
+	if(connection->egress_streams[id].pending_size > DEFAULT_MAX_PENDING_SIZE) {
+        LQ_DEBUG_CORE("TODO: stream max pending size limited\r\n");
+        return 0;
+    }
+
 	if(NULL == rlink->free_stream_header) {
         LQ_DEBUG_CORE("TODO: no free space\r\n");
         return 0;
@@ -741,6 +773,8 @@ TYPE_BUFFER_SIZE lq_write(pRCONNECTION connection, TYPE_STREAM_ID id, cyg_uint8 
     *ppbuffer = sb;
 
     connection->egress_streams[id].offset += sb->len;
+    connection->egress_streams[id].pending_size += sb->len;
+    connection->egress_streams[id].sended_size += sb->len;
     return sb->len;
 }
 
@@ -774,7 +808,7 @@ pRCONNECTION rlink_connect(pRLINK link, pRLINK_ADDR addr) {
  *+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  * Figure 20: STREAM帧格式
  **/
-static BOOL stream_egress(pRCONNECTION connection, pRSTREAM stream, cyg_uint8 **pos, cyg_uint8 *end) {
+static BOOL stream_buffer_egress(pRCONNECTION connection, pRSTREAM stream, cyg_uint8 **pos, cyg_uint8 *end) {
 	pRLINK rlink = connection->rlink;
 	BOOL hasStream = FALSE;
     TYPE_PACKET_NUMBER packet_nb = connection->packet_nb;
@@ -862,7 +896,7 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
         uint_t p = b->hi;
 		do {
 			diet_insert(p_acked, p, 0);
-		}while(--p > b->lo);
+		}while(--p >= b->lo);
         // end of ack for ack cache.
 
         prev_lo = b->lo;
@@ -900,7 +934,7 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
 
     cyg_uint8 const *check_pos = pos;
 
-    if(stream_egress(connection, &connection->egress_streams[STREAM_ID_CRYPTO], &pos, end) == TRUE)
+    if(stream_buffer_egress(connection, &connection->egress_streams[STREAM_ID_CRYPTO], &pos, end) == TRUE)
    		send_frm_types |= STREAM_EGRESS_ATTR[STREAM_ID_CRYPTO].type;
 
     // 我们用STREAM SLOT 1来传输 ACK需要理解发送的PN 信息
@@ -912,7 +946,7 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
     int stream_index;
     for(stream_index = 3; stream_index <= (sizeof(STREAM_EGRESS_ATTR)/sizeof(STREAM_EGRESS_ATTR[0])); stream_index++) {
         // 不应该被传输，原因之一是没有得到加密数据。
-        if(stream_egress(connection, &connection->egress_streams[stream_index], &pos, end) == TRUE)
+        if(stream_buffer_egress(connection, &connection->egress_streams[stream_index], &pos, end) == TRUE)
        		send_frm_types |= STREAM_EGRESS_ATTR[stream_index].type;
     }
 

@@ -28,61 +28,74 @@ const char *event_name[] = {
 };
 
 static void show_connection(pRCONNECTION connection) {
-    LQ_DEBUG_CORE("        Sending Packet Number: %llu\r\n", connection->packet_nb);
-    LQ_DEBUG_CORE("               Status Machine: %s\r\n", state_name[connection->state]);
-    LQ_DEBUG_CORE("             Received Packets: %6u,   Sended Packets: %6u\r\n", connection->received_packet, connection->sended_packet);
-    LQ_DEBUG_CORE("             Received AckOnly: %6u,   Sended AckOnly: %6u\r\n", connection->received_ackonly, connection->sended_ackonly);
-    LQ_DEBUG_CORE("                  Sended Ack1: %6u,      Sended Ack2: %6u\r\n", connection->ack1_sended, connection->ack2_sended);
+    LQ_DEBUG_SUMMARY("        Sending Packet Number: %llu\r\n", connection->packet_nb);
+    LQ_DEBUG_SUMMARY("               Status Machine: %s\r\n", state_name[connection->state]);
+    LQ_DEBUG_SUMMARY("             Received Packets: %6u,   Sended Packets: %6u\r\n", connection->received_packet, connection->sended_packet);
+    LQ_DEBUG_SUMMARY("             Received AckOnly: %6u,   Sended AckOnly: %6u\r\n", connection->received_ackonly, connection->sended_ackonly);
+    LQ_DEBUG_SUMMARY("                  Sended Ack1: %6u,      Sended Ack2: %6u\r\n", connection->ack1_sended, connection->ack2_sended);
     int loop;
     for(loop = 0; loop < sizeof(connection->egress_streams)/sizeof(connection->egress_streams[0]); loop++) {
-        if(NULL != connection->egress_streams[loop].buffer_header)
-            LQ_DEBUG_CORE("      Stream [" FMT_SID "] contains datas\r\n", loop);
+    	pRSTREAM stream = &connection->egress_streams[loop];
+    	if((stream->sended_size > 0) || (stream->pending_size > 0))
+            LQ_DEBUG_SUMMARY("   > Stream [" FMT_SID "] sended size: %6llu,     pending size: %6llu\r\n", loop,
+            		stream->sended_size, stream->pending_size);
+        if(NULL != stream->buffer_header)
+            LQ_DEBUG_SUMMARY("      Stream [" FMT_SID "] contains datas\r\n", loop);
+    }
+
+    for(loop = 0; loop < sizeof(connection->ingress_streams)/sizeof(connection->ingress_streams[0]); loop++) {
+    	pRSTREAM stream = &connection->ingress_streams[loop];
+    	if((stream->received_size > 0) || (stream->offset > 0))
+            LQ_DEBUG_SUMMARY(" < Stream [" FMT_SID "] received size: %6llu,      readed size: %6llu\r\n", loop,
+            		stream->received_size, stream->offset);
+        if(NULL != stream->buffer_header)
+            LQ_DEBUG_SUMMARY("      Stream [" FMT_SID "] contains datas\r\n", loop);
     }
 
     struct diet *p_acked = &connection->acked;
     if(!diet_empty(p_acked)) {
-	    LQ_DEBUG_CORE("%30s", "acked:");
+	    LQ_DEBUG_SUMMARY("   packet number %6llu acked: ", connection->ack_pn);
 	    int br = 0;
     	struct ival *i;
     	diet_foreach(i, diet, p_acked) {
-    	    LQ_DEBUG_CORE("[%u:%u] ", i->hi, i->lo);
+    	    LQ_DEBUG_SUMMARY("[%u:%u] ", i->lo, i->hi);
     	    if(++br%10 == 0)
-    		    LQ_DEBUG_CORE("\r\n%30s", ":");
+    		    LQ_DEBUG_SUMMARY("\r\n%30s", ":");
     	}
-	    LQ_DEBUG_CORE("\r\n");
+	    LQ_DEBUG_SUMMARY("\r\n");
     }
 
     struct diet *pn = &connection->pn_space.recv;
     if(!diet_empty(pn)) {
     	struct ival *i;
-	    LQ_DEBUG_CORE("%30s", "received packet space:");
+	    LQ_DEBUG_SUMMARY("%31s", "received packet space: ");
 	    int br = 0;
     	diet_foreach(i, diet, pn) {
-    	    LQ_DEBUG_CORE("[%u:%u] ", i->hi, i->lo);
+    	    LQ_DEBUG_SUMMARY("[%u:%u] ", i->lo, i->hi);
     	    if(++br%10 == 0)
-    		    LQ_DEBUG_CORE("\r\n%30s", ":");
+    		    LQ_DEBUG_SUMMARY("\r\n%30s", ":");
     	}
-	    LQ_DEBUG_CORE("\r\n");
+	    LQ_DEBUG_SUMMARY("\r\n");
     }
 
     pRPACKET p = connection->received_packet_header;
     while(NULL != p) {
-	    LQ_DEBUG_CORE("%30s %d  (%p)\r\n", "received packets refs:", p->ref, p);
+	    LQ_DEBUG_SUMMARY("%30s %d  (%p)\r\n", "received packets refs:", p->ref, p);
     	p = p->next;
     }
 }
 
 static void show_rlink(pRLINK rlink) {
-    LQ_DEBUG_CORE("-------- RLINK %p (%s) status --------------------------------\r\n", rlink, rlink->isClient?" CLIENT" : "SERVER");
+    LQ_DEBUG_SUMMARY("-------- RLINK %p (%s) status --------------------------------\r\n", rlink, rlink->isClient?" CLIENT" : "SERVER");
     int count = 0;
     pRCONNECTION connect = rlink->connections_mgr.connection_header;
 
     for(; NULL != connect; count++, connect = connect->next) {
-        LQ_DEBUG_CORE("  -- CONNECTION [%d] ---- SCID: %llu  DCID: %llu\r\n", count+1, connect->local_cid, connect->target_cid);
+        LQ_DEBUG_SUMMARY("  -- CONNECTION [%d] ---- SCID: %llu  DCID: %llu\r\n", count+1, connect->local_cid, connect->target_cid);
         show_connection(connect);
     }
-    LQ_DEBUG_CORE(" ------------  total connections: %d -----------------------------\r\n", count);
-    LQ_DEBUG_CORE("      TEST: %s\r\n", rlink->test_ok ? "finished" : "continue");
+    LQ_DEBUG_SUMMARY(" ------------  total connections: %d -----------------------------\r\n", count);
+    LQ_DEBUG_SUMMARY("      TEST: %s\r\n", rlink->test_ok ? "finished" : "continue");
 }
 
 static int global_stop = 0;
@@ -94,13 +107,13 @@ static BOOL stop_condiction(pRLINK server, pRLINK client) {
 	}
 
     if(server->protocol_violate == TRUE) {
-        LQ_DEBUG_CORE("Server Protocol violate\r\n");
+        LQ_DEBUG_SUMMARY("Server Protocol violate\r\n");
         global_stop = 1;
         return true;
     }
 
     if(client->protocol_violate == TRUE) {
-        LQ_DEBUG_CORE("Client Protocol violate\r\n");
+        LQ_DEBUG_SUMMARY("Client Protocol violate\r\n");
         global_stop = 1;
         return true;
     }
@@ -215,12 +228,16 @@ void log_packet(const char *logger, pRPACKET packet) {
 // 一个RLINK可以存在多个链接，特别是SERVER端，当链接建立后，需要为每个CONNECTION分配其上下文（为STREAM？）
 
 struct application_ctx_demo {
-
+	int read_bytes;
 };
 
 struct server_ctx_demo {
 	TYPE_STREAM_OFFSET app_16_offset;
+	int send_bytes;
 };
+
+#define DEMO_TRANSFER_BLOCK_SIZE 100
+#define DEMO_BLOCK_CONTENT  "12345678901234567890123456789012345678901234567890123456789012345678901234567890"
 
 // NOTE: 也许可以设计，当 stream_id == 0 的是否，是connection初期建立。
 int application_impl(pRCONNECTION connection, TYPE_STREAM_ID id, cyg_uint32 event, void *ctx) {
@@ -239,10 +256,15 @@ int application_impl(pRCONNECTION connection, TYPE_STREAM_ID id, cyg_uint32 even
 		if(event == EVENT_ID_READABLE) {
 			// LQ_DEBUG_APPL("[DEBUG:APPL] {Client} connection for client\r\n");
 			char buf[128];
-			int len = lq_read(connection, 16, buf, sizeof("server"));
+			int len = lq_read(connection, 16, buf, sizeof(DEMO_BLOCK_CONTENT));
 			LQ_DEBUG_APPL("[DEBUG:APPL] {Client} Get size %d\r\n", len);
-			// Delay 2000 us to get test OK.
-			request_timer(connection, 16, 2000);
+
+			demo_ctx->read_bytes += len;
+			if(demo_ctx->read_bytes < (DEMO_TRANSFER_BLOCK_SIZE * sizeof(DEMO_BLOCK_CONTENT)))
+				request_read(connection, 16);
+			else
+				// Delay 2000 us to get test OK.
+				request_timer(connection, 16, 2000);
 		} else if(event == EVENT_ID_TIMER) {
 			connection->rlink->test_ok = TRUE;
 			LQ_DEBUG_APPL("[DEBUG:APPL] {Client} Test OK!!!\r\n");
@@ -268,12 +290,17 @@ int server_impl(pRCONNECTION connection, TYPE_STREAM_ID id, cyg_uint32 event, vo
 		if(event == EVENT_ID_TIMER) {
 			LQ_DEBUG_APPL("[DEBUG:APPL] !!!!!!!!!!!! TIMER !!!!!!!!!!!!!!!!!!!!\r\n");
 			request_write(connection, 16);
-		} else if((event == EVENT_ID_WRITEABLE) && demo_ctx->app_16_offset == 0) {
-			lq_write(connection, 16, "server", sizeof("server"));
-			demo_ctx->app_16_offset += sizeof("server");
-			LQ_DEBUG_APPL("[DEBUG:APPL] {Server} Push server stream\r\n");
+		} else if((event == EVENT_ID_WRITEABLE) && demo_ctx->send_bytes < (DEMO_TRANSFER_BLOCK_SIZE * sizeof(DEMO_BLOCK_CONTENT))) {
+			int len = lq_write(connection, 16, DEMO_BLOCK_CONTENT, sizeof(DEMO_BLOCK_CONTENT));
+			if(len > 0) {
+				LQ_DEBUG_APPL("[DEBUG:APPL] {Server} Push server stream\r\n");
+				demo_ctx->send_bytes += len;
+				demo_ctx->app_16_offset += sizeof(DEMO_BLOCK_CONTENT);
+			} else {
+				LQ_DEBUG_APPL("[DEBUG:APPL] {Server} Write operation depended\r\n");
+			}
 			request_write(connection, 16);
-		} else if((event == EVENT_ID_WRITEABLE) && demo_ctx->app_16_offset > 0) {
+		} else if((event == EVENT_ID_WRITEABLE) && demo_ctx->app_16_offset >= (DEMO_TRANSFER_BLOCK_SIZE * sizeof(DEMO_BLOCK_CONTENT))) {
 			LQ_DEBUG_APPL("[DEBUG:APPL] {Server} Test OK!!!\r\n");
 			connection->rlink->test_ok = TRUE;
 		}
