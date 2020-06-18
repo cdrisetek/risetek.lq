@@ -67,7 +67,7 @@ const STREAM_ARRT STREAM_INGRESS_ATTR[] = {
 // 从 stream 读取期望数量的数据。
 TYPE_BUFFER_SIZE lq_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer, TYPE_BUFFER_SIZE length) {
 	pRLINK rlink = connection->rlink;
-	pRSTREAM stream = &connection->ingress_streams[id];
+	pINSTREAM stream = &connection->ingress_streams[id];
 
 	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
 	pRSTREAM_BUFFER pbuffer = *ppbuffer;
@@ -101,7 +101,7 @@ TYPE_BUFFER_SIZE lq_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffe
 // 从 stream 读取期望数量的数据。
 static int stream_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer, int length) {
 	pRLINK rlink = connection->rlink;
-	pRSTREAM stream = &connection->ingress_streams[id];
+	pINSTREAM stream = &connection->ingress_streams[id];
 
 	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
 	pRSTREAM_BUFFER pbuffer = *ppbuffer;
@@ -132,7 +132,7 @@ static int stream_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer,
 	return length;
 }
 
-static int crypto_egress_stream_process(pRCONNECTION connection, pRSTREAM stream) {
+static int crypto_egress_stream_process(pRCONNECTION connection, pESTREAM stream) {
 	pRLINK rlink = connection->rlink;
 
 	if(stream->offset == 0) {
@@ -153,7 +153,7 @@ static int crypto_egress_stream_process(pRCONNECTION connection, pRSTREAM stream
 	return NO_ERROR;
 }
 
-static int crypto_ingress_stream_process(pRCONNECTION connection, pRSTREAM stream) {
+static int crypto_ingress_stream_process(pRCONNECTION connection, pINSTREAM stream) {
 	pRLINK rlink = connection->rlink;
 
 	if(stream->id != STREAM_ID_CRYPTO) {
@@ -215,7 +215,7 @@ static int crypto_ingress_stream_process(pRCONNECTION connection, pRSTREAM strea
 	return NO_ERROR;
 }
 
-static int core_egress_stream_process(pRCONNECTION connection, pRSTREAM stream) {
+static int core_egress_stream_process(pRCONNECTION connection, pESTREAM stream) {
 	pRLINK rlink = connection->rlink;
 	switch(stream->id) {
 	case STREAM_ID_CRYPTO:
@@ -230,7 +230,7 @@ static int core_egress_stream_process(pRCONNECTION connection, pRSTREAM stream) 
 	return NO_ERROR;
 }
 
-static int core_ingress_stream_process(pRCONNECTION connection, pRSTREAM stream) {
+static int core_ingress_stream_process(pRCONNECTION connection, pINSTREAM stream) {
 	pRLINK rlink = connection->rlink;
 	switch(stream->id) {
 	case STREAM_ID_CRYPTO:
@@ -245,7 +245,7 @@ static int core_ingress_stream_process(pRCONNECTION connection, pRSTREAM stream)
 	return NO_ERROR;
 }
 
-static int application_egress_stream_process(pRCONNECTION connection, pRSTREAM stream, cyg_uint32 event_id) {
+static int application_egress_stream_process(pRCONNECTION connection, pESTREAM stream, cyg_uint32 event_id) {
 	pRLINK rlink = connection->rlink;
 
 	stream->interesting_event &= ~(1 << event_id);
@@ -253,7 +253,7 @@ static int application_egress_stream_process(pRCONNECTION connection, pRSTREAM s
 	return NO_ERROR;
 }
 
-static int application_ingress_stream_process(pRCONNECTION connection, pRSTREAM stream) {
+static int application_ingress_stream_process(pRCONNECTION connection, pINSTREAM stream) {
 	pRLINK rlink = connection->rlink;
 
 	stream->interesting_event &= ~CONNECTION_EVENT_READABLE;
@@ -270,7 +270,7 @@ BOOL connection_is_writeable(pRCONNECTION connection) {
 		return FALSE;
 }
 
-BOOL stream_is_writeable(pRCONNECTION connection, pRSTREAM pstream) {
+BOOL stream_is_writeable(pRCONNECTION connection, pESTREAM pstream) {
 	if((connection->rlink->free_stream_header != NULL) && (pstream->pending_size < DEFAULT_MAX_PENDING_SIZE))
 		return TRUE;
 	else
@@ -287,7 +287,7 @@ static void connection_upstream(pRCONNECTION connection) {
 
     // INGRESS process
     for(loop = 0; loop < sizeof(STREAM_INGRESS_ATTR)/sizeof(STREAM_INGRESS_ATTR[0]); loop++) {
-    	pRSTREAM pstream = &connection->ingress_streams[loop];
+    	pINSTREAM pstream = &connection->ingress_streams[loop];
 
     	if(pstream->buffer_header == NULL)
     		continue;
@@ -310,7 +310,7 @@ static void connection_upstream(pRCONNECTION connection) {
 
     // EGRESS process
 	for(loop = 0; loop < sizeof(STREAM_EGRESS_ATTR)/sizeof(STREAM_EGRESS_ATTR[0]); loop++) {
-		pRSTREAM pstream = &connection->egress_streams[loop];
+		pESTREAM pstream = &connection->egress_streams[loop];
 
 		// TIMER Process
 		if(((STREAM_EGRESS_ATTR[loop].type & STREAM_CORE) == 0)
@@ -443,7 +443,7 @@ static inline void connection_cleanstream(pRCONNECTION connection) {
 	pRLINK rlink = connection->rlink;
     int loop;
     for(loop = 0; loop < sizeof(connection->egress_streams)/sizeof(connection->egress_streams[0]); loop++) {
-    	pRSTREAM stream = &connection->egress_streams[loop];
+    	pESTREAM stream = &connection->egress_streams[loop];
     	if((STREAM_EGRESS_ATTR[stream->id].type & STREAM_HAS_BUFFER) == 0)
     		continue;
 
@@ -491,7 +491,7 @@ static void cleanstream_range_connection(pRCONNECTION connection, TYPE_PACKET_NU
 
 	int loop;
     for(loop = 0; loop < sizeof(connection->egress_streams)/sizeof(connection->egress_streams[0]); loop++) {
-    	pRSTREAM stream = &connection->egress_streams[loop];
+    	pESTREAM stream = &connection->egress_streams[loop];
 
     	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
         while(NULL != *ppbuffer) {
@@ -628,7 +628,7 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
         // TODO: 有可能是重复接收到的数据，而且麻烦的是其长度还可能不一样！
         // 这个问题实际是对发送端的要求问题。
 
-		pRSTREAM pstream = &connection->ingress_streams[id];
+		pINSTREAM pstream = &connection->ingress_streams[id];
 		pstream->ingress_size += stream_len;
     	int dup = 0;
     	// TODO: STREAM_HAS_OFFSET
@@ -803,7 +803,7 @@ pRCONNECTION rlink_connect(pRLINK link, pRLINK_ADDR addr) {
  *+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  * Figure 20: STREAM帧格式
  **/
-static BOOL stream_buffer_egress(pRCONNECTION connection, pRSTREAM stream, cyg_uint8 **pos, cyg_uint8 *end) {
+static BOOL stream_buffer_egress(pRCONNECTION connection, pESTREAM stream, cyg_uint8 **pos, cyg_uint8 *end) {
 	pRLINK rlink = connection->rlink;
 	BOOL hasStream = FALSE;
 

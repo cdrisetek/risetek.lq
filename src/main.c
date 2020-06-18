@@ -8,6 +8,57 @@
 #include "lib/marshall.h"
 #include "rlink.h"
 
+#include <signal.h>
+#include <execinfo.h>
+static void print_trace(void) {
+	fprintf(stderr, "dump trace\r\n");
+	void           *array[32];    /* Array to store backtrace symbols */
+	size_t          size;     /* To store the exact no of values stored */
+	char          **strings;    /* To store functions from the backtrace list in ARRAY */
+	size_t          nCnt;
+
+	size = backtrace(array, 32);
+	fprintf(stderr, "dump trace 2\r\n");
+	strings = backtrace_symbols(array, size);
+
+	fprintf(stderr,"-- %p %p\r\n", array, strings);
+
+	if(NULL == strings)
+		fprintf(stderr,"print_trace: do not got strings\r\n");
+	/* prints each string of function names of trace*/
+	for (nCnt = 0; nCnt < size; nCnt++) {
+		char *message = strings[nCnt];
+		fprintf(stderr,"%s\r\n", message);
+	  // free(message);
+	}
+}
+
+static void sigroutine(int dunno) {
+	switch (dunno) {
+		case SIGHUP:
+			printf("Get a signal -- SIGHUP\r\n");
+			break;
+		case SIGINT:
+			printf("Get a signal -- SIGINT\r\n");
+			break;
+		case SIGQUIT:
+			printf("Get a signal -- SIGQUIT\r\n");
+			break;
+		case SIGABRT:
+			printf("Get a signal -- SIGABRT\r\n");
+			print_trace();
+			break;
+		case SIGSEGV:
+			printf("Get a signal -- SIGSEGV\r\n");
+			print_trace();
+			break;
+		default:
+			printf("Get a signal -- %d\r\n", dunno);
+			break;
+	}
+	_exit(0);
+}
+
 static BOOL islucky(void) {
 //	return TRUE;
 	if(rand() < (RAND_MAX/100*50))
@@ -37,7 +88,7 @@ static void show_connection(pRCONNECTION connection) {
     LQ_DEBUG_SUMMARY("                  Sended Ack1: %6u,      Sended Ack2: %6u\r\n", connection->ack1_sended, connection->ack2_sended);
     int loop;
     for(loop = 0; loop < sizeof(connection->egress_streams)/sizeof(connection->egress_streams[0]); loop++) {
-    	pRSTREAM stream = &connection->egress_streams[loop];
+    	pESTREAM stream = &connection->egress_streams[loop];
     	if((stream->sended_size > 0) || (stream->pending_size > 0))
             LQ_DEBUG_SUMMARY("     > Stream[" FMT_SID "] write size: %6llu,     pending size: %6llu,"
             			     "    egressed: %4llu bytes, Timeout: %4llu frames\r\n",
@@ -47,7 +98,7 @@ static void show_connection(pRCONNECTION connection) {
     }
 
     for(loop = 0; loop < sizeof(connection->ingress_streams)/sizeof(connection->ingress_streams[0]); loop++) {
-    	pRSTREAM stream = &connection->ingress_streams[loop];
+    	pINSTREAM stream = &connection->ingress_streams[loop];
     	if((stream->received_size > 0) || (stream->offset > 0))
             LQ_DEBUG_SUMMARY("  < Stream[" FMT_SID "] received size: %6llu,      readed size: %6llu,  ingress size:  %6llu"
             		         "    Received duplicate: %6llu bytes [%4llu frames]\r\n",
@@ -450,6 +501,11 @@ static void rlink_test_loop(int sleep_sec) {
 }
 
 int main(int argc, char *argv[]) {
+	signal(SIGHUP, sigroutine); //* 下面设置三个信号的处理方法
+	signal(SIGINT, sigroutine);
+	signal(SIGQUIT, sigroutine);
+	signal(SIGSEGV, sigroutine);
+	signal(SIGABRT, sigroutine);
 
 	int loop_times = 0;
 	int sleep_sec = 0;
@@ -485,5 +541,6 @@ int main(int argc, char *argv[]) {
 
 	for(int i = 0; (i <= loop_times) && (global_stop == 0); i++)
 		rlink_test_loop(sleep_sec);
+
 	return 0;
 }

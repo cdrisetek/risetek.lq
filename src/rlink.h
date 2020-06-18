@@ -60,7 +60,7 @@
 
 #define DEFAULT_RTT_US                 40
 #define DEFAULT_HEADER_BYTE            0x80
-#define DEFAULT_MAX_PENDING_SIZE       (2*1024)
+#define DEFAULT_MAX_PENDING_SIZE       (4*1024)
 typedef enum {
     connection_init,
     connection_handshake,
@@ -111,19 +111,16 @@ typedef struct r_stream_buffer {
     // DEBUG
 } RSTREAM_BUFFER, *pRSTREAM_BUFFER;
 
-typedef struct r_stream {
+typedef struct e_stream {
     TYPE_STREAM_ID id;
     TYPE_STREAM_OFFSET offset;
-    int avaliable_len;
     pRSTREAM_BUFFER buffer_header;
 
     // APPLICATION
-    cyg_uint32 notified_event;
     cyg_uint32 notify_event;
     cyg_uint32 interesting_event;
     // 应用层希望在给定时间点产生CONNECT_EVENT_TIMER事件
     TYPE_TIMER_US timer_interesting;
-
 
     // eStream CC
     TYPE_STREAM_OFFSET max_pending_size;
@@ -136,14 +133,26 @@ typedef struct r_stream {
     // Statistic
     TYPE_STREAM_OFFSET sended_size;
     TYPE_STREAM_OFFSET egress_size;
+} ESTREAM, *pESTREAM;
+
+typedef struct in_stream {
+    TYPE_STREAM_ID id;
+    TYPE_STREAM_OFFSET offset;
+    int avaliable_len;
+    pRSTREAM_BUFFER buffer_header;
+
+    // APPLICATION
+    cyg_uint32 notify_event;
+    cyg_uint32 interesting_event;
+    // 应用层希望在给定时间点产生CONNECT_EVENT_TIMER事件
+    TYPE_TIMER_US timer_interesting;
+
+    // Statistic
     TYPE_STREAM_OFFSET received_size;
     TYPE_STREAM_OFFSET ingress_size;
-
-    // inStream
     TYPE_STREAM_OFFSET dup_transfer;
     TYPE_STREAM_OFFSET dup_bytes;
-
-} RSTREAM, *pRSTREAM;
+} INSTREAM, *pINSTREAM;
 
 struct r_link;
 
@@ -182,10 +191,10 @@ typedef struct r_connection {
     // TODO: 不同作用的stream分组进行管理？
 
     // send endpoints
-    RSTREAM    egress_streams[NUMBER_OF_STREAMS+1];
+    ESTREAM    egress_streams[NUMBER_OF_STREAMS+1];
 
     // receive endpoints
-    RSTREAM    ingress_streams[NUMBER_OF_STREAMS+1];
+    INSTREAM    ingress_streams[NUMBER_OF_STREAMS+1];
 
     TYPE_PACKET_NUMBER packet_nb;
     pRPACKET received_packet_header;
@@ -247,11 +256,9 @@ typedef struct r_link {
     const char *debug_prompt;
 } RLINK, *pRLINK;
 
-typedef int stream_handler(pRCONNECTION connection, pRSTREAM stream);
-
 typedef struct {
 	cyg_uint32 type;
-	stream_handler *handler;  // stream process handler
+	void *handler;  // stream process handler
 } STREAM_ARRT;
 
 #define NO_ERROR                  0x0
