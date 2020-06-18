@@ -60,7 +60,7 @@
 
 #define DEFAULT_RTT_US                 40
 #define DEFAULT_HEADER_BYTE            0x80
-#define DEFAULT_MAX_PENDING_SIZE       (70)
+#define DEFAULT_MAX_PENDING_SIZE       (2*1024)
 typedef enum {
     connection_init,
     connection_handshake,
@@ -104,7 +104,7 @@ typedef struct r_stream_buffer {
      * 5. 基于这个考虑，packet number的初始化值需要从 1 开始， 或者任何大于 0 的序号。
      **/
     TYPE_PACKET_NUMBER packet_nb;
-    TYPE_TIMER_US ticks;
+    TYPE_TIMER_US time_us;
     struct r_stream_buffer *next;
 
 
@@ -125,13 +125,24 @@ typedef struct r_stream {
     TYPE_TIMER_US timer_interesting;
 
 
-    // CC
+    // eStream CC
     TYPE_STREAM_OFFSET max_pending_size;
     TYPE_STREAM_OFFSET pending_size;
+    TYPE_STREAM_OFFSET naked_bytes;
+    TYPE_STREAM_OFFSET naked_frames;
+    TYPE_STREAM_OFFSET timeout_bytes;
+    TYPE_STREAM_OFFSET timeout_frames;
 
     // Statistic
     TYPE_STREAM_OFFSET sended_size;
+    TYPE_STREAM_OFFSET egress_size;
     TYPE_STREAM_OFFSET received_size;
+    TYPE_STREAM_OFFSET ingress_size;
+
+    // inStream
+    TYPE_STREAM_OFFSET dup_transfer;
+    TYPE_STREAM_OFFSET dup_bytes;
+
 } RSTREAM, *pRSTREAM;
 
 struct r_link;
@@ -157,8 +168,6 @@ struct ingress_crypto_stream_priv {
 	int offset;
 };
 
-//typedef int connection_event_cb(struct r_connection *connection, TYPE_STREAM_ID stream_id, cyg_uint32 event);
-
 typedef struct r_connection {
     RLINK_CID  local_cid;
     RLINK_CID  target_cid;
@@ -182,7 +191,7 @@ typedef struct r_connection {
     pRPACKET received_packet_header;
 
     // CC
-    TYPE_TIMER_US   rtt;
+    TYPE_TIMER_US   rtt_us;
 
     struct r_link *rlink;
     struct r_connection *next;
@@ -204,6 +213,7 @@ typedef struct r_connection {
     cyg_uint32 sended_ackonly;
     cyg_uint32 ack1_sended;
     cyg_uint32 ack2_sended;
+    cyg_uint32 lost_packet;
 } RCONNECTION, *pRCONNECTION;
 
 typedef struct r_connection_mgr {
@@ -217,8 +227,7 @@ typedef struct r_link {
     BOOL isClient;
     RCONNECTION_MGR connections_mgr;
     RLINK_CID base_link_id;
-    TYPE_TIMER_US ticks;
-//    TYPE_TIMER_US last_ticks;
+    TYPE_TIMER_US current_time_us;
 
     RPACKET  __packets[MAX_LINK_PACKETS];
     pRPACKET free_packets;

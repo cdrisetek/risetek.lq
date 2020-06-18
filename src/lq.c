@@ -317,8 +317,8 @@ static void connection_upstream(pRCONNECTION connection) {
 				&& (rlink->link_handler != NULL)
 				&& (connection->state == connection_idle)
 				&& (pstream->interesting_event & CONNECTION_EVENT_TIMER)
-				&& (pstream->timer_interesting < rlink->ticks)) {
-            LQ_DEBUG_CORE("TIMER %llu -- %llu\r\n", pstream->timer_interesting, rlink->ticks);
+				&& (pstream->timer_interesting < rlink->current_time_us)) {
+            LQ_DEBUG_CORE("TIMER %llu -- %llu\r\n", pstream->timer_interesting, rlink->current_time_us);
 			application_egress_stream_process(connection, pstream, EVENT_ID_TIMER);
 		}
 
@@ -373,7 +373,7 @@ pRLINK rlink_create(BOOL isClient, pRLINK_ADDR addr) {
     link->base_link_id = rand();
     link->connections_mgr.connection_header = NULL;
     link->test_ok = 0;
-    link->ticks = 0;
+    link->current_time_us = 0;
     link->protocol_violate = FALSE;
 
     // pRPACKET
@@ -406,7 +406,7 @@ pRCONNECTION _new_connection(pRLINK link, pRLINK_ADDR addr) {
     connection->packet_nb = INIT_PACKET_NUMBER;
 //    connection->pn_space.need_ack = FALSE;
     connection->received_packet_header = NULL;
-    connection->rtt = DEFAULT_RTT_US;
+    connection->rtt_us = DEFAULT_RTT_US;
     connection->rlink = link;
     diet_init(&connection->pn_space.recv);
 
@@ -440,38 +440,22 @@ pRCONNECTION _new_connection(pRLINK link, pRLINK_ADDR addr) {
  */
 
 static inline void connection_cleanstream(pRCONNECTION connection) {
+	pRLINK rlink = connection->rlink;
     int loop;
     for(loop = 0; loop < sizeof(connection->egress_streams)/sizeof(connection->egress_streams[0]); loop++) {
     	pRSTREAM stream = &connection->egress_streams[loop];
-
     	if((STREAM_EGRESS_ATTR[stream->id].type & STREAM_HAS_BUFFER) == 0)
     		continue;
 
-        pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
-
-        while(NULL != *ppbuffer) {
-            pRSTREAM_BUFFER pbuffer = *ppbuffer;
-
-            if(pbuffer->packet_nb == MIN_PACKET_NUMBER) {
-            	// MIN_PACKET_NUMBER 表明这个buffer没有被承载到packet上。
-            	// 跳过这个buffer，继续处理下一个buffer。
-                ppbuffer = &(*ppbuffer)->next;
-                continue;
-            }
-
-            else if(connection->rlink->ticks > (pbuffer->ticks + connection->rtt)) {
-                // 激活超过 RTT 的 stream buffer
-    #if 0
-                LQ_DEBUG_CORE("> stream %d should old space %p for packet_nb: %llu\r\n",
-                        stream->id, pbuffer, pbuffer->packet_nb);
-    #endif
-                pbuffer->packet_nb = MIN_PACKET_NUMBER;
-                ppbuffer = &(*ppbuffer)->next;
-            } else {
-    //            LQ_DEBUG_CORE("clean stream[%d] not handler %llu %llu? %p\r\n", stream->id, connection->rlink->ticks, pbuffer->ticks, pbuffer);
-                ppbuffer = &(*ppbuffer)->next;
-            }
-        }
+    	pRSTREAM_BUFFER pbuffer = stream->buffer_header;
+		for(; pbuffer != NULL; pbuffer = pbuffer->next) {
+			if((pbuffer->packet_nb != MIN_PACKET_NUMBER)
+				&& (rlink->current_time_us > (pbuffer->time_us + 20*connection->rtt_us))) {
+				// 激活超过 RTT 的 stream buffer
+				stream->timeout_frames++;
+				pbuffer->packet_nb = MIN_PACKET_NUMBER;
+			}
+		}
     }
 }
 
@@ -493,13 +477,16 @@ static void cleanstream_range_connection(pRCONNECTION connection, TYPE_PACKET_NU
 	 */
     struct ival * b;
 	if(connection->ack_pn <= max && connection->ack_pn >= min) {
-		LQ_DEBUG_CORE("[%s] {%s} <%llu-%llu-%llu> ack for ack:", rlink->debug_prompt, rlink->isClient?"Client":"Server", min, connection->ack_pn, max);
+		LQ_DEBUG_CORE("[%s] {%s} <%llu-%llu-%llu> ack for ack:", rlink->debug_prompt,
+				      rlink->isClient?"Client":"Server", min, connection->ack_pn, max);
 		diet_foreach_rev (b, diet, &connection->acked) {
 			LQ_DEBUG_CORE(" [%u:%u]", b->lo, b->hi);
 			diet_remove_ival(&connection->pn_space.recv,
 							 &(const struct ival){.lo = b->lo, .hi = b->hi});
 		}
 		LQ_DEBUG_CORE("\r\n");
+
+		diet_free(&connection->acked);
 	}
 
 	int loop;
@@ -509,11 +496,8 @@ static void cleanstream_range_connection(pRCONNECTION connection, TYPE_PACKET_NU
     	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
         while(NULL != *ppbuffer) {
             pRSTREAM_BUFFER pbuffer = *ppbuffer;
-
-        	if(pbuffer->packet_nb == MIN_PACKET_NUMBER) {
-                ppbuffer = &(*ppbuffer)->next;
-                continue;
-            } else if (pbuffer->packet_nb >= min && pbuffer->packet_nb <= max) {
+           if((pbuffer->packet_nb != MIN_PACKET_NUMBER)
+        	  && (pbuffer->packet_nb >= min && pbuffer->packet_nb <= max)) {
             	if(STREAM_EGRESS_ATTR[stream->id].type & STREAM_HAS_OFFSET)
             		LQ_DEBUG_CORE("[%s:CORE] {%s} Stream[" FMT_SID ":%llu] buffer clean by pn %llu\r\n",
             				rlink->debug_prompt, rlink->isClient?"Client":"Server", stream->id, pbuffer->offset, pbuffer->packet_nb);
@@ -524,18 +508,11 @@ static void cleanstream_range_connection(pRCONNECTION connection, TYPE_PACKET_NU
                 *ppbuffer = (*ppbuffer)->next;
                 // 已经确定被对端接收到的packet所包含的stream buffer归还到可用buffer空间。
                 stream->pending_size -= pbuffer->len;
-
                 pbuffer->packet_nb = MIN_PACKET_NUMBER;
                 pbuffer->next = rlink->free_stream_header;
                 rlink->free_stream_header = pbuffer;
-            } else if(connection->rlink->ticks > (pbuffer->ticks + connection->rtt)) {
-                // 激活超过 RTT 的 stream buffer
-                // LQ_DEBUG_CORE("stream %d should old space\r\n", stream->id);
-            	LQ_DEBUG_CORE("[%s:CORE] {%s} Stream[" FMT_SID "] should old space %p for packet_nb: " FMT_PN "\r\n",
-            			rlink->debug_prompt, rlink->isClient?"Client":"Server", stream->id, pbuffer, pbuffer->packet_nb);
-                pbuffer->packet_nb = MIN_PACKET_NUMBER;
-                ppbuffer = &(*ppbuffer)->next;
-            } else {
+            }
+            else {
                 ppbuffer = &(*ppbuffer)->next;
             }
         }
@@ -591,13 +568,29 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
         return;
     }
 
+	// TODO: 这里的实现方式是将接收到的packet内容分别拷贝到stream的接收链表中
+	// 也可以考虑用rlink提供packet接收空间，让stream分别指向packet接受空间的区域
+	// 当stream消耗完成后，释放packet接收空间。
+	if(NULL == rlink->free_stream_header) {
+		LQ_DEBUG_CORE("TODO: no free space\r\n");
+		//break;
+		exit(0);
+	}
+
     TYPE_PACKET_NUMBER packet_nb;
     decv(&packet_nb, &pos, end);
 
     pPN_SPACE pn = &connection->pn_space;
-    diet_insert(&pn->recv, packet_nb, 0);
 
     // TODO: 如果新接入的packet number 比预期的不止大一个，说明有丢包情况出现，需要 立即回应 ACK.
+    const struct ival * const first_rng = diet_max_ival(&pn->recv);
+    if((NULL != first_rng) && (packet_nb > (first_rng->hi + 1))) {
+   		LQ_DEBUG_CORE("[%s:CORE] {%s} Lost packet, want %u, but %llu\r\n",
+   				rlink->debug_prompt, rlink->isClient?"Client":"Server", (first_rng->hi + 1), packet_nb);
+   		pn->rx_frm_types |= STREAM_INGRESS_IMM_ACK;
+    }
+
+    diet_insert(&pn->recv, packet_nb, 0);
 
     while(packet->len > (pos - (packet->buf))) {
         // decode stread id
@@ -624,98 +617,100 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
         TYPE_STREAM_LENGTH stream_len = 0;
         if(STREAM_INGRESS_ATTR[id].type & STREAM_HAS_LENGTH)
         	dec2(&stream_len, &pos, end);
-#if 0
+
         // 早期QUCI规范不允许长度为 0 的 stream， 后来取消了这个规定，为什么？
+        // TODO: handle Stream Length equal 0.
         if(0 == stream_len) {
             LQ_DEBUG_CORE("stream length should greate 0\r\n");
             connection->rlink->protocol_violate = TRUE;
         }
-#endif
+
         // TODO: 有可能是重复接收到的数据，而且麻烦的是其长度还可能不一样！
         // 这个问题实际是对发送端的要求问题。
 
 		pRSTREAM pstream = &connection->ingress_streams[id];
-        if((stream_len > 0) && (offset >= pstream->offset))
+		pstream->ingress_size += stream_len;
+    	int dup = 0;
+    	// TODO: STREAM_HAS_OFFSET
+    	if(offset < pstream->offset)
+    		dup = 1;
+    	else
         {
         	// 检查是否重复达到的packet
         	pRSTREAM_BUFFER b = pstream->buffer_header;
-        	int dup = 0;
 			for(; NULL != b; b = b->next) {
 				if(b->offset == offset) {
 
 					// 这个地方应该怎么处理？接收到的数据长度不同，会引起内部处理的复杂性
 					if(b->len != stream_len) {
-						LQ_DEBUG_ERROR("dup packet for stream[%d] offset: %llu has different length: %u - %u\r\n", id, offset, b->len, stream_len);
+						LQ_DEBUG_ERROR("duplicate packet for stream[%d] offset: %llu has different length: %u - %u\r\n", id, offset, b->len, stream_len);
 						exit(0);
 					}
 
-					LQ_DEBUG_CORE("dup packet for stream[%d] offset: %llu\r\n", id, offset);
+					LQ_DEBUG_CORE("duplicate packet for stream[%d] offset: %llu\r\n", id, offset);
 					dup = 1;
+					pstream->dup_bytes += stream_len;
 					break;
 				}
 			}
+        }
 
-			if(!dup) {
-				// TODO: 这里的实现方式是将接收到的packet内容分别拷贝到stream的接收链表中
-				// 也可以考虑用rlink提供packet接收空间，让stream分别指向packet接受空间的区域
-				// 当stream消耗完成后，释放packet接收空间。
-				if(NULL == rlink->free_stream_header) {
-					LQ_DEBUG_CORE("TODO: no free space\r\n");
-					break;
-				}
+		if(dup) {
+			pstream->dup_bytes += stream_len;
+			pstream->dup_transfer++;
+		}
+		else
+		{
+			pRSTREAM_BUFFER sb = rlink->free_stream_header;
+			rlink->free_stream_header = rlink->free_stream_header->next;
 
-				pRSTREAM_BUFFER sb = rlink->free_stream_header;
-				rlink->free_stream_header = rlink->free_stream_header->next;
+			sb->offset = offset;
+			sb->len = stream_len;
+			memcpy(sb->buffer, pos, sb->len);
 
-				sb->offset = offset;
-				sb->len = stream_len;
-				memcpy(sb->buffer, pos, sb->len);
-
-				// TODO: 按照offset顺序排列，算法需要优化
-				if(STREAM_INGRESS_ATTR[pstream->id].type & STREAM_HAS_OFFSET) {
-					pRSTREAM_BUFFER *pb = &pstream->buffer_header;
-					while(NULL != *pb) {
-						if((*pb)->offset >= sb->offset)
-							break;
-
-						pb = &(*pb)->next;
-					}
-					sb->next = *pb;
-					*pb = sb;
-				} else {
-					sb->next = pstream->buffer_header;
-					pstream->buffer_header = sb;
-				}
-
-				sb->packet = packet;
-				sb->packet_pos = pos;
-				sb->packet_stream_len = stream_len;
-				pstream->received_size += stream_len;
-				packet->ref++;
-
-				// 计算连续的可用数据长度
+			// TODO: 按照offset顺序排列，算法需要优化
+			if(STREAM_INGRESS_ATTR[pstream->id].type & STREAM_HAS_OFFSET) {
 				pRSTREAM_BUFFER *pb = &pstream->buffer_header;
-				TYPE_STREAM_OFFSET offset_tail = pstream->offset;
 				while(NULL != *pb) {
-					if((*pb)->offset == offset_tail) {
-						offset_tail += (*pb)->len;
-					} else
+					if((*pb)->offset >= sb->offset)
 						break;
 
 					pb = &(*pb)->next;
 				}
-
-				pstream->avaliable_len = offset_tail - pstream->offset;
-				LQ_DEBUG_CORE("[DEBUG:CORE] Stream[" FMT_SID "] readable %08X, received offset: %llu\r\n", pstream->id, pstream->notify_event, offset);
+				sb->next = *pb;
+				*pb = sb;
+			} else {
+				sb->next = pstream->buffer_header;
+				pstream->buffer_header = sb;
 			}
-			// else LQ_DEBUG_APPL("DUP SET stream %d to readable %08X, received offset: %llu\r\n", pstream->id, pstream->notify_event, offset);
 
-			// 如果buffer的位置与读取的位置相等，说明有数据可读
-			if((NULL != pstream->buffer_header) && (pstream->offset == pstream->buffer_header->offset))
-				pstream->notify_event |= CONNECTION_EVENT_READABLE;
-			else
-				pstream->notify_event &= ~CONNECTION_EVENT_READABLE;
-        }
+			sb->packet = packet;
+			sb->packet_pos = pos;
+			sb->packet_stream_len = stream_len;
+			pstream->received_size += stream_len;
+			packet->ref++;
+
+			// 计算连续的可用数据长度
+			pRSTREAM_BUFFER *pb = &pstream->buffer_header;
+			TYPE_STREAM_OFFSET offset_tail = pstream->offset;
+			while(NULL != *pb) {
+				if((*pb)->offset == offset_tail) {
+					offset_tail += (*pb)->len;
+				} else
+					break;
+
+				pb = &(*pb)->next;
+			}
+
+			pstream->avaliable_len = offset_tail - pstream->offset;
+			LQ_DEBUG_CORE("[DEBUG:CORE] Stream[" FMT_SID "] readable %08X, received offset: %llu\r\n", pstream->id, pstream->notify_event, offset);
+		}
+
+		// 如果buffer的位置与读取的位置相等，说明有数据可读
+		if((NULL != pstream->buffer_header) && (pstream->offset == pstream->buffer_header->offset))
+			pstream->notify_event |= CONNECTION_EVENT_READABLE;
+		else
+			pstream->notify_event &= ~CONNECTION_EVENT_READABLE;
 
 		pos += stream_len;
 
@@ -811,11 +806,9 @@ pRCONNECTION rlink_connect(pRLINK link, pRLINK_ADDR addr) {
 static BOOL stream_buffer_egress(pRCONNECTION connection, pRSTREAM stream, cyg_uint8 **pos, cyg_uint8 *end) {
 	pRLINK rlink = connection->rlink;
 	BOOL hasStream = FALSE;
-    TYPE_PACKET_NUMBER packet_nb = connection->packet_nb;
-    pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
-    while(NULL != *ppbuffer) {
-        pRSTREAM_BUFFER pbuffer = *ppbuffer;
-        ppbuffer = &(*ppbuffer)->next;
+
+    pRSTREAM_BUFFER pbuffer = stream->buffer_header;
+    for(; NULL != pbuffer; pbuffer = pbuffer->next) {
         if(pbuffer->packet_nb != MIN_PACKET_NUMBER)
             continue;
         // TODO: check space!!!
@@ -831,8 +824,9 @@ static BOOL stream_buffer_egress(pRCONNECTION connection, pRSTREAM stream, cyg_u
 
         // encode datas
         encb(pos, end, pbuffer->buffer, pbuffer->len);
-        pbuffer->packet_nb = packet_nb;
-        pbuffer->ticks = rlink->ticks;
+        pbuffer->packet_nb = connection->packet_nb;
+        pbuffer->time_us = rlink->current_time_us;
+        stream->egress_size += pbuffer->len;
         hasStream = TRUE;
     }
     return hasStream;
@@ -851,20 +845,13 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
     if(first_rng == NULL)
     	return FALSE;
 
-//    if(STREAM_ID_ACK1 == stream_id && !(pn->need_ack))
-    if(STREAM_ID_ACK1 == stream_id && !(pn->rx_frm_types & STREAM_INGRESS_IMM_ACK))
+    if((STREAM_ID_ACK1 == stream_id) && !(pn->rx_frm_types & STREAM_INGRESS_IMM_ACK))
     	return FALSE;
 
-	if((STREAM_ID_ACK2 == stream_id) && (rlink->ticks - pn->last_ack_time < connection->rtt) || (pn->pkts_rxed_since_last_ack_tx == 0))
+    if((STREAM_ID_ACK2 == stream_id)
+        && ((rlink->current_time_us < (pn->last_ack_time + connection->rtt_us))
+		|| (pn->pkts_rxed_since_last_ack_tx == 0)))
 	    return FALSE;
-
-    LQ_DEBUG_CORE("[%s] {%s} Generator for ACK%d > ", rlink->debug_prompt, rlink->isClient?"Client":"Server", stream_id);
-
-    // TODO: recorder all acked packet ?
-    // Free last cached acked packet number.
-    struct diet *p_acked = &connection->acked;
-    if(!diet_empty(p_acked))
-    	diet_free(p_acked);
 
     enc1(pos, end, stream_id);
     encv(pos, end, first_rng->hi);
@@ -877,6 +864,37 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
 
     uint_t prev_lo = 0;
     struct ival * b;
+
+    // TODO: recorder all acked packet ?
+    // Free last cached acked packet number.
+    struct diet *p_acked = &connection->acked;
+    if(!diet_empty(p_acked)) {
+#if 1 // DEBUG_CODE
+        LQ_DEBUG_CORE("[%s] {%s} ACK%d replace packet: " FMT_PN " ",
+        		rlink->debug_prompt, rlink->isClient?"Client":"Server", stream_id, connection->ack_pn);
+
+        diet_foreach_rev (b, diet, &connection->acked) {
+            uint_t gap = 0;
+            if (prev_lo) {
+                gap = prev_lo - b->hi - 2;
+                LQ_DEBUG_CORE("-%u-", gap + 1);
+            }
+            const uint_t ack_rng = b->hi - b->lo;
+            if(b->hi != b->lo)
+            	LQ_DEBUG_CORE("[%u:%u]", b->hi, b->lo);
+            else
+            	LQ_DEBUG_CORE("[%u]", b->hi);
+
+            prev_lo = b->lo;
+        }
+        LQ_DEBUG_CORE("\r\n");
+#endif
+        diet_free(p_acked);
+    }
+
+    LQ_DEBUG_CORE("[%s] {%s} Generator for ACK%d in packet: " FMT_PN " > ",
+    		rlink->debug_prompt, rlink->isClient?"Client":"Server", stream_id, connection->packet_nb);
+    prev_lo = 0;
     diet_foreach_rev (b, diet, &pn->recv) {
         uint_t gap = 0;
         if (prev_lo) {
@@ -903,7 +921,7 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
     }
     connection->ack_pn = connection->packet_nb;
     pn->pkts_rxed_since_last_ack_tx = 0;
-    pn->last_ack_time = rlink->ticks;
+    pn->last_ack_time = rlink->current_time_us;
     pn->rx_frm_types = 0;
     // pn->need_ack = FALSE;
 
@@ -958,6 +976,9 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
     else {
         packet->len = pos - packet->buf;
         connection->packet_nb++;
+#if 1 // DEBUG_ONLY
+        packet->connection = connection;
+#endif
         if((send_frm_types & ~STREAM_CORE) == STREAM_EGRESS_ACK)
         	connection->sended_ackonly++;
     }
@@ -1191,7 +1212,7 @@ void request_read(pRCONNECTION connection, TYPE_STREAM_ID id) {
 // 之所以复杂处理，是因为当STREAM可写的时候，我们不一定有数据可以发送，因此可以用定时事件来
 // 调度下一刻，使得有数据发送时可以发送。
 void request_timer(pRCONNECTION connection, TYPE_STREAM_ID id, TYPE_TIMER_US delay_us) {
-	connection->egress_streams[id].timer_interesting = connection->rlink->ticks + delay_us;
+	connection->egress_streams[id].timer_interesting = connection->rlink->current_time_us + delay_us;
 	connection->egress_streams[id].interesting_event |= CONNECTION_EVENT_TIMER;
 }
 

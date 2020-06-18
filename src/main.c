@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/time.h>
 #include "lib/marshall.h"
 #include "rlink.h"
 
@@ -29,6 +30,7 @@ const char *event_name[] = {
 
 static void show_connection(pRCONNECTION connection) {
     LQ_DEBUG_SUMMARY("        Sending Packet Number: %llu\r\n", connection->packet_nb);
+    LQ_DEBUG_SUMMARY("           Undelivered packet: %u\r\n", connection->lost_packet);
     LQ_DEBUG_SUMMARY("               Status Machine: %s\r\n", state_name[connection->state]);
     LQ_DEBUG_SUMMARY("             Received Packets: %6u,   Sended Packets: %6u\r\n", connection->received_packet, connection->sended_packet);
     LQ_DEBUG_SUMMARY("             Received AckOnly: %6u,   Sended AckOnly: %6u\r\n", connection->received_ackonly, connection->sended_ackonly);
@@ -37,19 +39,21 @@ static void show_connection(pRCONNECTION connection) {
     for(loop = 0; loop < sizeof(connection->egress_streams)/sizeof(connection->egress_streams[0]); loop++) {
     	pRSTREAM stream = &connection->egress_streams[loop];
     	if((stream->sended_size > 0) || (stream->pending_size > 0))
-            LQ_DEBUG_SUMMARY("   > Stream [" FMT_SID "] sended size: %6llu,     pending size: %6llu\r\n", loop,
-            		stream->sended_size, stream->pending_size);
+            LQ_DEBUG_SUMMARY("     > Stream[" FMT_SID "] write size: %6llu,     pending size: %6llu,"
+            			     "    egressed: %4llu bytes, Timeout: %4llu frames\r\n",
+            		loop, stream->sended_size, stream->pending_size, stream->egress_size, stream->timeout_frames);
         if(NULL != stream->buffer_header)
-            LQ_DEBUG_SUMMARY("      Stream [" FMT_SID "] contains datas\r\n", loop);
+            LQ_DEBUG_SUMMARY("       Stream[" FMT_SID "] contains datas\r\n", loop);
     }
 
     for(loop = 0; loop < sizeof(connection->ingress_streams)/sizeof(connection->ingress_streams[0]); loop++) {
     	pRSTREAM stream = &connection->ingress_streams[loop];
     	if((stream->received_size > 0) || (stream->offset > 0))
-            LQ_DEBUG_SUMMARY(" < Stream [" FMT_SID "] received size: %6llu,      readed size: %6llu\r\n", loop,
-            		stream->received_size, stream->offset);
+            LQ_DEBUG_SUMMARY("  < Stream[" FMT_SID "] received size: %6llu,      readed size: %6llu,  ingress size:  %6llu"
+            		         "    Received duplicate: %6llu bytes [%4llu frames]\r\n",
+            		loop, stream->received_size, stream->offset, stream->ingress_size, stream->dup_bytes, stream->dup_transfer);
         if(NULL != stream->buffer_header)
-            LQ_DEBUG_SUMMARY("      Stream [" FMT_SID "] contains datas\r\n", loop);
+            LQ_DEBUG_SUMMARY("       Stream[" FMT_SID "] contains datas\r\n", loop);
     }
 
     struct diet *p_acked = &connection->acked;
@@ -237,7 +241,7 @@ struct server_ctx_demo {
 };
 
 #define DEMO_TRANSFER_BLOCK_SIZE 100
-#define DEMO_BLOCK_CONTENT  "12345678901234567890123456789012345678901234567890123456789012345678901234567890"
+#define DEMO_BLOCK_CONTENT  "2345678901234567890123456789012345678901234567890123456789012345678901234567890"
 
 // NOTE: 也许可以设计，当 stream_id == 0 的是否，是connection初期建立。
 int application_impl(pRCONNECTION connection, TYPE_STREAM_ID id, cyg_uint32 event, void *ctx) {
@@ -309,6 +313,12 @@ int server_impl(pRCONNECTION connection, TYPE_STREAM_ID id, cyg_uint32 event, vo
 	}
 }
 
+TYPE_TIMER_US getCurrentTimeUS(void) {
+	struct timeval tv;
+	gettimeofday(&tv,NULL);
+	return 1000000 * tv.tv_sec + tv.tv_usec;
+}
+
 static void rlink_test_loop(int sleep_sec) {
     int loop_times = 0;
 
@@ -326,9 +336,11 @@ static void rlink_test_loop(int sleep_sec) {
 
     // Create Server
     server = rlink_create(FALSE, &server_addr);
+	server->current_time_us = getCurrentTimeUS();
     register_application(server, server_impl, NULL);
     // Create Client
     client = rlink_create(TRUE, &client_addr);
+	client->current_time_us = getCurrentTimeUS();
     register_application(client, application_impl, NULL);
 
     // get Client connection to Server, this trigger connect.
@@ -381,11 +393,13 @@ static void rlink_test_loop(int sleep_sec) {
 				if(NO_ERROR != rlink_ingress(server, &packet))
 					break;
 			}
-			// else LQ_DEBUG_CORE("packet discard to server\r\n");
+			else {
+				packet.connection->lost_packet++;
+			}
 		}
 
         // 模拟网络时间
-		client->ticks++;
+		client->current_time_us = getCurrentTimeUS();
 
 		// 清理stream中已经用完的stream buffer空间。
     	server->debug_prompt = "CLEAN";
@@ -416,11 +430,11 @@ static void rlink_test_loop(int sleep_sec) {
 					break;
 				}
 			}
-			// else LQ_DEBUG_CORE("packet discard to client\r\n");
+			else packet.connection->lost_packet++;
 		}
 
 		// 模拟网络时间
-		server->ticks++;
+		server->current_time_us = getCurrentTimeUS();
 
 		if(sleep_sec)
 			sleep(sleep_sec);
