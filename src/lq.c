@@ -390,12 +390,22 @@ pRLINK rlink_create(BOOL isClient, pRLINK_ADDR addr) {
     return link;
 }
 
+void connection_destroy(pRCONNECTION connection) {
+    if(connection->rlink->link_handler)
+    	(connection->rlink->link_handler)(connection, 1, 0, NULL);
+
+    free(connection);
+}
+
 void rlink_destroy(pRLINK rlink) {
-    pRCONNECTION connection = rlink->connections_mgr.connection_header;
-    for(; NULL != connection; connection = connection->next) {
-        if(connection->rlink->link_handler)
-        	(connection->rlink->link_handler)(connection, 1, 0, NULL);
+    while(NULL != rlink->connections_mgr.connection_header) {
+        pRCONNECTION connection = rlink->connections_mgr.connection_header;
+        rlink->connections_mgr.connection_header = connection->next;
+
+    	connection_destroy(connection);
     }
+
+    free(rlink);
 }
 
 pRCONNECTION _new_connection(pRLINK link, pRLINK_ADDR addr) {
@@ -811,7 +821,13 @@ static BOOL stream_buffer_egress(pRCONNECTION connection, pESTREAM stream, cyg_u
     for(; NULL != pbuffer; pbuffer = pbuffer->next) {
         if(pbuffer->packet_nb != MIN_PACKET_NUMBER)
             continue;
+
         // TODO: check space!!!
+        int require = 1 + sizeof(TYPE_STREAM_LENGTH) + sizeof(TYPE_STREAM_OFFSET) + pbuffer->len;
+        if((end - *pos) < require) {
+        	fprintf(stderr, "no packet space for stream\r\n");
+        	break;
+        }
         // encode stread id
         enc1(pos, end, stream->id);
 
@@ -853,12 +869,22 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
 		|| (pn->pkts_rxed_since_last_ack_tx == 0)))
 	    return FALSE;
 
+    // TODO: we need at least stream-id + largest-pn + delay + range-cnt + ()
+
+    if((end - *pos) < (1 + sizeof(TYPE_PACKET_NUMBER) + sizeof(uint64_t) /* ack delay */+ sizeof(uint_t) /* range count */
+    		+ 2 * sizeof(uint64_t) /* One ACK range and One ACK Gap */)) {
+    	fprintf(stderr, "no packet space for ACK%d\r\n", stream_id);
+	    return FALSE;
+    }
+
+
     enc1(pos, end, stream_id);
     encv(pos, end, first_rng->hi);
 
     const uint64_t ack_delay = 0;
     encv(pos, end, ack_delay);
 
+    // TODO: what if packet space can not contains all ACK?
     const uint_t ack_rng_cnt = diet_cnt(&pn->recv) - 1;
     encv(pos, end, ack_rng_cnt);
 
@@ -934,6 +960,7 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
     return TRUE;
 }
 
+// TODO: we should deliver LOST stream first somehow.
 static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
 	pRLINK rlink = connection->rlink;
     // 模拟对端接收到报文后能够知道报文发送源地址。
@@ -944,7 +971,8 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
     cyg_uint32  send_frm_types = 0;
 
     cyg_uint8 *pos = packet->buf;
-    cyg_uint8 *end = packet->buf + packet->len;
+//    cyg_uint8 *end = packet->buf + packet->len;
+    cyg_uint8 *end = packet->buf + sizeof(packet->buf); //packet->len;
 
     enc1(&pos, end, DEFAULT_HEADER_BYTE);
     encb(&pos, end, (const cyg_uint8 *)&connection->target_cid, sizeof(connection->target_cid));
@@ -982,6 +1010,9 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
         if((send_frm_types & ~STREAM_CORE) == STREAM_EGRESS_ACK)
         	connection->sended_ackonly++;
     }
+
+    if(pos > end)
+    	fprintf(stderr, "!!!!!!!!!!!!!!!!!!!!!!!!!! packet overflow %p %p len: %d	!!!!!!!!!!!!!!!!!!!!!!!\r\n", pos, end, packet->len);
 }
 
 // 生成需要发送的packet。

@@ -11,17 +11,14 @@
 #include <signal.h>
 #include <execinfo.h>
 static void print_trace(void) {
-	fprintf(stderr, "dump trace\r\n");
 	void           *array[32];    /* Array to store backtrace symbols */
 	size_t          size;     /* To store the exact no of values stored */
 	char          **strings;    /* To store functions from the backtrace list in ARRAY */
 	size_t          nCnt;
 
 	size = backtrace(array, 32);
-	fprintf(stderr, "dump trace 2\r\n");
-	strings = backtrace_symbols(array, size);
 
-	fprintf(stderr,"-- %p %p\r\n", array, strings);
+	strings = backtrace_symbols(array, size);
 
 	if(NULL == strings)
 		fprintf(stderr,"print_trace: do not got strings\r\n");
@@ -227,7 +224,7 @@ void log_packet(const char *logger, pRPACKET packet) {
     TYPE_PACKET_NUMBER packet_nb;
     decv(&packet_nb, &pos, end);
 
-    LQ_DEBUG_PKT("|| Packet Length: %d, Header byte: %02X\r\n", packet->len, header_byte);
+    LQ_DEBUG_PKT("|| Packet Length: %d%s, Header byte: %02X\r\n", packet->len, (packet->len > sizeof(packet->buf))?"--!!!Overflow!!!":"",  header_byte);
     // LQ_DEBUG_PKT("Packet Header: %02X\r\n", header_byte);
     LQ_DEBUG_PKT("||     Target-ID: " FMT_CID "\r\n", target_id);
     LQ_DEBUG_PKT("|| Packet Number: " FMT_PN "\r\n", packet_nb);
