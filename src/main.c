@@ -100,8 +100,13 @@ static void show_connection(pRCONNECTION connection) {
             LQ_DEBUG_SUMMARY("  < Stream[" FMT_SID "] received size: %6llu,      readed size: %6llu,  ingress size:  %6llu"
             		         "    Received duplicate: %6llu bytes [%4llu frames]\r\n",
             		loop, stream->received_size, stream->offset, stream->ingress_size, stream->dup_bytes, stream->dup_transfer);
-        if(NULL != stream->buffer_header)
+#if 0
+    	if(NULL != stream->buffer_header)
             LQ_DEBUG_SUMMARY("       Stream[" FMT_SID "] contains datas\r\n", loop);
+#else
+    	if(NULL != stream->slinker.packet)
+            LQ_DEBUG_SUMMARY("       Stream[" FMT_SID "] contains datas\r\n", loop);
+#endif
     }
 
     struct diet *p_acked = &connection->acked;
@@ -421,6 +426,7 @@ static void rlink_test_loop(int sleep_sec) {
 
 		for(;;) {
 			// clear
+	    	memset(&packet, 0x0, sizeof(packet));
 			packet.len = 0;
 			packet.connection = NULL;
 
@@ -461,6 +467,7 @@ static void rlink_test_loop(int sleep_sec) {
 
 		for(;;) {
 			// clear
+	    	memset(&packet, 0x0, sizeof(packet));
 			packet.len = 0;
 			packet.connection = NULL;
 

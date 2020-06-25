@@ -64,42 +64,108 @@ const STREAM_ARRT STREAM_INGRESS_ATTR[] = {
 		{(STREAM_HAS_OFFSET | STREAM_HAS_LENGTH | STREAM_HAS_BUFFER),  NULL}, // STREAM_ID_23
 };
 
+// find and set linker's next to linker
+struct SLinker *nextslink(struct SLinker *linker, TYPE_STREAM_OFFSET *offset,
+		TYPE_STREAM_LENGTH *stream_len, const cyg_uint8 **retpos) {
+	pRPACKET p = (pRPACKET)linker->packet;
+	const cyg_uint8 *pos = &p->buf[linker->soffset];
+	cyg_uint8 *end = &p->buf[p->len];
+	TYPE_STREAM_ID item; // this for fitem.
+    dec1(&item, &pos, end);
+
+    // decode stream offset
+    TYPE_STREAM_OFFSET _offset;
+	decv(&_offset, &pos, end);
+    if(NULL != offset)
+    	*offset = _offset;
+    // decode stream length
+    TYPE_STREAM_LENGTH _stream_len;
+	dec2(&_stream_len, &pos, end);
+    if(NULL != stream_len)
+    	*stream_len = _stream_len;
+    if(retpos != NULL)
+    	*retpos = pos;
+    struct SLinker *links = (struct SLinker *)&p->buf[p->len];
+    return &links[item];
+}
+
 // 从 stream 读取期望数量的数据。
 TYPE_BUFFER_SIZE lq_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer, TYPE_BUFFER_SIZE length) {
 	pRLINK rlink = connection->rlink;
 	pINSTREAM stream = &connection->ingress_streams[id];
+#if 0
+	// PACKET remain style
+	struct SLinker *linker = &stream->slinker;
+	pRPACKET p = (pRPACKET)linker->packet;
+	const cyg_uint8 *pos = &p->buf[linker->soffset];
+	cyg_uint8 *end = &p->buf[p->len];
+	TYPE_STREAM_ID item; // this for fitem.
+    dec1(&item, &pos, end);
 
-	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
-	pRSTREAM_BUFFER pbuffer = *ppbuffer;
+    // decode stream offset
+    TYPE_STREAM_OFFSET offset = 0;
+#if 1
+    if(STREAM_INGRESS_ATTR[id].type & STREAM_HAS_OFFSET)
+    	decv(&offset, &pos, end);
+#endif
+    // decode stream length
+    TYPE_STREAM_LENGTH stream_len = 0;
+#if 1
+    if(STREAM_INGRESS_ATTR[id].type & STREAM_HAS_LENGTH)
+    	dec2(&stream_len, &pos, end);
+#endif
+//    struct SLinker *links = (struct SLinker *)&p->buf[p->len];
+//    struct SLinker *fill = &links[item];
+#endif
+	struct SLinker *linker = &stream->slinker;
+	pRPACKET p = (pRPACKET)linker->packet;
+	p->ref--;
 
-	if(stream->offset != pbuffer->offset) {
+    TYPE_STREAM_OFFSET offset = 0;
+    TYPE_STREAM_LENGTH stream_len = 0;
+	const cyg_uint8 *pos;
+
+	struct SLinker *next = nextslink(&stream->slinker, &offset, &stream_len, &pos);
+    stream->slinker.packet = next->packet;
+    stream->slinker.soffset = next->soffset;
+
+	if(stream->offset != offset) {
 		LQ_DEBUG_CORE("[%s] {%s} lq_read failed, available: %llu, request: %llu\r\n",
 				rlink->debug_prompt, rlink->isClient?"Client":"Server",
-				stream->offset, pbuffer->offset);
+				stream->offset, offset);
 		return 0;
 	}
 
-	if(length != (*ppbuffer)->len) {
-		fprintf(stderr, "stream read failed, require %d, available: %d\r\n", length, (*ppbuffer)->len);
+	if(length != stream_len) {
+		fprintf(stderr, "stream read failed, require %d, available: %d\r\n", length, stream_len);
 		exit(0);
 	}
 
-	memcpy(buffer, (*ppbuffer)->packet_pos, length);
+	memcpy(buffer, pos, length);
+	stream->avaliable_len -= stream_len;
+	stream->offset += stream_len;
 
-	stream->offset += pbuffer->len;
+
+
+#if 0
+	pRSTREAM_BUFFER *ppbuffer = &stream->buffer_header;
+	pRSTREAM_BUFFER pbuffer = *ppbuffer;
+//	memcpy(buffer, (*ppbuffer)->packet_pos, length);
+//	stream->offset += pbuffer->len;
 	*ppbuffer = (*ppbuffer)->next;
-
 	// return stream buffer to free_stream_buffers.
-	pbuffer->packet->ref--;
+	// pbuffer->packet->ref--;
 	pbuffer->next = rlink->free_stream_header;
 	rlink->free_stream_header = pbuffer;
-
-	stream->avaliable_len -= pbuffer->len;
+#endif
 	return length;
 }
 
 // 从 stream 读取期望数量的数据。
 static int stream_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer, int length) {
+#if 1
+	return lq_read(connection, id, buffer, length);
+#else
 	pRLINK rlink = connection->rlink;
 	pINSTREAM stream = &connection->ingress_streams[id];
 
@@ -129,7 +195,21 @@ static int stream_read(pRCONNECTION connection, TYPE_STREAM_ID id, char *buffer,
 	rlink->free_stream_header = pbuffer;
 
 	stream->avaliable_len -= pbuffer->len;
+
+	// PACKET remain style
+	struct SLinker *linker = &stream->slinker;
+	pRPACKET p = (pRPACKET)linker->packet;
+	const cyg_uint8 *pos = &p->buf[linker->soffset];
+	cyg_uint8 *end = &p->buf[p->len];
+	TYPE_STREAM_ID item; // this for fitem.
+    dec1(&item, &pos, end);
+	struct SLinker *links = (struct SLinker *)&p->buf[p->len];
+    struct SLinker *fill = &links[item];
+    stream->slinker.packet = fill->packet;
+    stream->slinker.soffset = fill->soffset;
+
 	return length;
+#endif
 }
 
 static int crypto_egress_stream_process(pRCONNECTION connection, pESTREAM stream) {
@@ -288,10 +368,13 @@ static void connection_upstream(pRCONNECTION connection) {
     // INGRESS process
     for(loop = 0; loop < sizeof(STREAM_INGRESS_ATTR)/sizeof(STREAM_INGRESS_ATTR[0]); loop++) {
     	pINSTREAM pstream = &connection->ingress_streams[loop];
-
+#if 0
     	if(pstream->buffer_header == NULL)
     		continue;
-
+#else
+    	if(pstream->slinker.packet == NULL)
+    		continue;
+#endif
 		// for core stream, always readable
 		if(STREAM_INGRESS_ATTR[loop].type & STREAM_CORE)
 			core_ingress_stream_process(connection, pstream);
@@ -302,10 +385,19 @@ static void connection_upstream(pRCONNECTION connection) {
 			application_ingress_stream_process(connection, pstream);
 
 		// READ完成后，重新判断stream是否有数据可读
+		pstream->notify_event &= ~CONNECTION_EVENT_READABLE;
+#if 0
 		if((NULL != pstream->buffer_header) && (pstream->offset == pstream->buffer_header->offset))
 			pstream->notify_event |= CONNECTION_EVENT_READABLE;
-		else
-			pstream->notify_event &= ~CONNECTION_EVENT_READABLE;
+#else
+		struct SLinker *slinker =  &pstream->slinker;
+		TYPE_STREAM_OFFSET _o;
+		if(slinker->packet != NULL) {
+			slinker = nextslink(slinker, &_o, NULL, NULL);
+			if(_o == pstream->offset)
+				pstream->notify_event |= CONNECTION_EVENT_READABLE;
+		}
+#endif
     }
 
     // EGRESS process
@@ -337,6 +429,36 @@ static void connection_upstream(pRCONNECTION connection) {
 		}
 
 	}
+#if 0
+	// TODO: maintance of PACKET remain style.
+    for(loop = 0; loop < sizeof(STREAM_INGRESS_ATTR)/sizeof(STREAM_INGRESS_ATTR[0]); loop++) {
+    	pINSTREAM instream = &connection->ingress_streams[loop];
+    	if(instream->slinker.packet == NULL)
+    		continue;
+
+    	struct SLinker *next, *linker = &instream->slinker;
+
+    	pRPACKET packet = (pRPACKET)linker->packet;
+
+    	while(NULL != packet && packet->ref == 0) {
+    		fprintf(stderr, "PACKET Style need clean up\r\n");
+    		const cyg_uint8 *pos = &packet->buf[linker->soffset];
+    		cyg_uint8 *end = &packet->buf[packet->len];
+			TYPE_STREAM_ID id; // this for fitem.
+	        dec1(&id, &pos, end);
+
+			struct SLinker *links = (struct SLinker *)&packet->buf[packet->len];
+	        struct SLinker *fill = &links[id];
+
+	        instream->slinker.packet = fill->packet;
+	        instream->slinker.soffset = fill->soffset;
+
+	        linker = &instream->slinker;
+	        packet = (pRPACKET)linker->packet;
+//    		exit(0);
+    	}
+    }
+#endif
 
     // Free unalloced packet space in connections.
     /**
@@ -351,6 +473,8 @@ static void connection_upstream(pRCONNECTION connection) {
 
 			p->next = connection->rlink->free_packets;
 			connection->rlink->free_packets = p;
+
+
 		}
 		else
 			ppacket = &(*ppacket)->next;
@@ -428,7 +552,7 @@ pRCONNECTION _new_connection(pRLINK link, pRLINK_ADDR addr) {
         connection->egress_streams[loop].offset = 0;
 
         connection->ingress_streams[loop].id = loop;
-        connection->ingress_streams[loop].buffer_header = NULL;
+//        connection->ingress_streams[loop].buffer_header = NULL;
         connection->ingress_streams[loop].offset = 0;
     }
 
@@ -558,9 +682,13 @@ void connection_handler_ack(cyg_uint8 const **pos, cyg_uint8* end, pRCONNECTION 
 }
 
 static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
+	// packet initial
+	packet->f_link_item = 0;
+
 	pRLINK rlink = connection->rlink;
     cyg_uint8 const *pos = packet->buf;
     cyg_uint8 *end = packet->buf + packet->len;
+
 
     cyg_uint8 header_byte;
     dec1(&header_byte, &pos, end);
@@ -592,7 +720,7 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 
     pPN_SPACE pn = &connection->pn_space;
 
-    // TODO: 如果新接入的packet number 比预期的不止大一个，说明有丢包情况出现，需要 立即回应 ACK.
+    // 如果新接入的packet number 比预期的不止大一个，说明有丢包情况出现，需要 立即回应 ACK.
     const struct ival * const first_rng = diet_max_ival(&pn->recv);
     if((NULL != first_rng) && (packet_nb > (first_rng->hi + 1))) {
    		LQ_DEBUG_CORE("[%s:CORE] {%s} Lost packet, want %u, but %llu\r\n",
@@ -602,7 +730,10 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 
     diet_insert(&pn->recv, packet_nb, 0);
 
+//	fprintf(stderr, "%p >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\r\n", packet);
     while(packet->len > (pos - (packet->buf))) {
+
+    	cyg_uint8 *spos = (cyg_uint8 *)pos;
         // decode stread id
         TYPE_STREAM_ID id;
         dec1(&id, &pos, end);
@@ -619,6 +750,15 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
             continue;
         }
 
+        // PACKET remain style, overwrite stream id to slink item index.
+		TYPE_STREAM_ID fitem = packet->f_link_item++;
+#if 1
+		*spos = fitem;
+#else
+        enc1(&spos, end, fitem);
+        spos -= 1; // back to origin.
+#endif
+
         // decode stream offset
         TYPE_STREAM_OFFSET offset = 0;
         if(STREAM_INGRESS_ATTR[id].type & STREAM_HAS_OFFSET)
@@ -631,46 +771,71 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
         // 早期QUCI规范不允许长度为 0 的 stream， 后来取消了这个规定，为什么？
         // TODO: handle Stream Length equal 0.
         if(0 == stream_len) {
-            LQ_DEBUG_CORE("stream length should greate 0\r\n");
+            LQ_DEBUG_CORE("stream length should greater than 0\r\n");
             connection->rlink->protocol_violate = TRUE;
         }
 
         // TODO: 有可能是重复接收到的数据，而且麻烦的是其长度还可能不一样！
         // 这个问题实际是对发送端的要求问题。
 
-		pINSTREAM pstream = &connection->ingress_streams[id];
-		pstream->ingress_size += stream_len;
+		pINSTREAM instream = &connection->ingress_streams[id];
+		instream->ingress_size += stream_len;
     	int dup = 0;
     	// TODO: STREAM_HAS_OFFSET
-    	if(offset < pstream->offset)
+    	if(offset < instream->offset)
     		dup = 1;
     	else
         {
+#if 0
         	// 检查是否重复达到的packet
-        	pRSTREAM_BUFFER b = pstream->buffer_header;
+        	pRSTREAM_BUFFER b = instream->buffer_header;
 			for(; NULL != b; b = b->next) {
 				if(b->offset == offset) {
 
 					// 这个地方应该怎么处理？接收到的数据长度不同，会引起内部处理的复杂性
 					if(b->len != stream_len) {
-						LQ_DEBUG_ERROR("duplicate packet for stream[%d] offset: %llu has different length: %u - %u\r\n", id, offset, b->len, stream_len);
+						LQ_DEBUG_ERROR("duplicate packet for stream[%d] offset: %llu has different length: %u - %u\r\n",
+								id, offset, b->len, stream_len);
 						exit(0);
 					}
 
 					LQ_DEBUG_CORE("duplicate packet for stream[%d] offset: %llu\r\n", id, offset);
 					dup = 1;
-					pstream->dup_bytes += stream_len;
+					instream->dup_bytes += stream_len;
 					break;
 				}
 			}
+#else
+			// PACKET remain style
+			struct SLinker *slinker =  &instream->slinker;
+			TYPE_STREAM_OFFSET _o;
+			TYPE_STREAM_LENGTH _l;
+			while(slinker->packet != NULL) {
+				slinker = nextslink(slinker, &_o, &_l, NULL);
+				if(_o == offset) {
+					// 这个地方应该怎么处理？接收到的数据长度不同，会引起内部处理的复杂性
+					if(_l != stream_len) {
+						LQ_DEBUG_ERROR("duplicate packet for stream[%d] offset: %llu has different length: %u - %u\r\n",
+								id, offset, _l, stream_len);
+						exit(0);
+					}
+
+					LQ_DEBUG_CORE("duplicate packet for stream[%d] offset: %llu\r\n", id, offset);
+					dup = 1;
+					instream->dup_bytes += _l;
+					break;
+				}
+			}
+#endif
         }
 
 		if(dup) {
-			pstream->dup_bytes += stream_len;
-			pstream->dup_transfer++;
+			instream->dup_bytes += stream_len;
+			instream->dup_transfer++;
 		}
 		else
 		{
+#if 0
 			pRSTREAM_BUFFER sb = rlink->free_stream_header;
 			rlink->free_stream_header = rlink->free_stream_header->next;
 
@@ -679,8 +844,8 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 			memcpy(sb->buffer, pos, sb->len);
 
 			// TODO: 按照offset顺序排列，算法需要优化
-			if(STREAM_INGRESS_ATTR[pstream->id].type & STREAM_HAS_OFFSET) {
-				pRSTREAM_BUFFER *pb = &pstream->buffer_header;
+			if(STREAM_INGRESS_ATTR[instream->id].type & STREAM_HAS_OFFSET) {
+				pRSTREAM_BUFFER *pb = &instream->buffer_header;
 				while(NULL != *pb) {
 					if((*pb)->offset >= sb->offset)
 						break;
@@ -690,19 +855,48 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 				sb->next = *pb;
 				*pb = sb;
 			} else {
-				sb->next = pstream->buffer_header;
-				pstream->buffer_header = sb;
+				sb->next = instream->buffer_header;
+				instream->buffer_header = sb;
 			}
-
 			sb->packet = packet;
 			sb->packet_pos = pos;
 			sb->packet_stream_len = stream_len;
-			pstream->received_size += stream_len;
+#endif
+			// PACKET remain style
+			// the end of buffer space for links.
+			// TODO: should be 4 byte align?
+			struct SLinker *slink =  &instream->slinker;
+			while(slink->packet != NULL)
+			{
+				TYPE_STREAM_OFFSET _o;
+				struct SLinker *s = nextslink(slink, &_o, NULL, NULL);
+				if(offset < _o)
+					break;
+				slink = s;
+			}
+			// Now we move to the right position
+			// fill my slink to next slink.
+			struct SLinker *links = (struct SLinker *)&packet->buf[packet->len];
+	        struct SLinker *fill = &links[fitem];
+	        if((cyg_uint8 *)fill > (packet->buf + sizeof(packet->buf))) {
+	        	fprintf(stderr, "Slink Fill out of space: %p buffer address: %p, item: %d\r\n", fill, packet->buf, fitem);
+	        	exit(1);
+	        }
+			fill->packet = slink->packet;
+			fill->soffset = slink->soffset;
+
+			// fill located slink to my self;
+			slink->packet = packet;
+			slink->soffset = spos - packet->buf;
+			// END of PACKET remain style
+
+			instream->received_size += stream_len;
 			packet->ref++;
 
 			// 计算连续的可用数据长度
-			pRSTREAM_BUFFER *pb = &pstream->buffer_header;
-			TYPE_STREAM_OFFSET offset_tail = pstream->offset;
+			TYPE_STREAM_OFFSET offset_tail = instream->offset;
+#if 0
+			pRSTREAM_BUFFER *pb = &instream->buffer_header;
 			while(NULL != *pb) {
 				if((*pb)->offset == offset_tail) {
 					offset_tail += (*pb)->len;
@@ -711,17 +905,39 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
 
 				pb = &(*pb)->next;
 			}
-
-			pstream->avaliable_len = offset_tail - pstream->offset;
-			LQ_DEBUG_CORE("[DEBUG:CORE] Stream[" FMT_SID "] readable %08X, received offset: %llu\r\n", pstream->id, pstream->notify_event, offset);
+#else
+			// PACKET remain style
+			struct SLinker *slinker =  &instream->slinker;
+			TYPE_STREAM_OFFSET _o;
+			TYPE_STREAM_LENGTH _l;
+			while(slinker->packet != NULL) {
+				slinker = nextslink(slinker, &_o, &_l, NULL);
+				if(_o == offset_tail) {
+					offset_tail += _l;
+				} else
+					break;
+			}
+#endif
+			instream->avaliable_len = offset_tail - instream->offset;
+			LQ_DEBUG_CORE("[DEBUG:CORE] Stream[" FMT_SID "] readable %08X, received offset: %llu\r\n",
+					instream->id, instream->notify_event, offset);
 		}
 
 		// 如果buffer的位置与读取的位置相等，说明有数据可读
-		if((NULL != pstream->buffer_header) && (pstream->offset == pstream->buffer_header->offset))
-			pstream->notify_event |= CONNECTION_EVENT_READABLE;
-		else
-			pstream->notify_event &= ~CONNECTION_EVENT_READABLE;
-
+		instream->notify_event &= ~CONNECTION_EVENT_READABLE;
+#if 0
+		if((NULL != instream->buffer_header) && (instream->offset == instream->buffer_header->offset))
+			instream->notify_event |= CONNECTION_EVENT_READABLE;
+#else
+		struct SLinker *slinker =  &instream->slinker;
+		TYPE_STREAM_OFFSET _o;
+		TYPE_STREAM_LENGTH _l;
+		if(slinker->packet != NULL) {
+			slinker = nextslink(slinker, &_o, &_l, NULL);
+			if(_o == instream->offset)
+				instream->notify_event |= CONNECTION_EVENT_READABLE;
+		}
+#endif
 		pos += stream_len;
 
         if(pos > end) {
@@ -729,6 +945,7 @@ static void connection_ingress(pRCONNECTION connection, pRPACKET packet) {
             exit(0);
         }
     }
+//	fprintf(stderr, "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\r\n");
 
     // 判断是否只有ACK。不应该去回应(ACK)只有ACK的PACKET.
     // DEBUG Statistics:
@@ -813,7 +1030,11 @@ pRCONNECTION rlink_connect(pRLINK link, pRLINK_ADDR addr) {
  *+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  * Figure 20: STREAM帧格式
  **/
-static BOOL stream_buffer_egress(pRCONNECTION connection, pESTREAM stream, cyg_uint8 **pos, cyg_uint8 *end) {
+
+/**
+ * 考虑到接收端实现的简易性，预留Stream Linker Struct接收端
+ */
+static BOOL stream_buffer_egress(pRCONNECTION connection, pRPACKET packet, pESTREAM stream, cyg_uint8 **pos, cyg_uint8 *end) {
 	pRLINK rlink = connection->rlink;
 	BOOL hasStream = FALSE;
 
@@ -823,8 +1044,9 @@ static BOOL stream_buffer_egress(pRCONNECTION connection, pESTREAM stream, cyg_u
             continue;
 
         // TODO: check space!!!
-        int require = 1 + sizeof(TYPE_STREAM_LENGTH) + sizeof(TYPE_STREAM_OFFSET) + pbuffer->len;
-        if((end - *pos) < require) {
+    	//  考虑到接收端实现的简易性，预留Stream Linker Struct接收端
+        int require = 1 /* stream id */ + sizeof(TYPE_STREAM_LENGTH) + sizeof(TYPE_STREAM_OFFSET) + pbuffer->len;
+        if((end - *pos - packet->slink_size) < require) {
         	fprintf(stderr, "no packet space for stream\r\n");
         	break;
         }
@@ -843,6 +1065,8 @@ static BOOL stream_buffer_egress(pRCONNECTION connection, pESTREAM stream, cyg_u
         pbuffer->packet_nb = connection->packet_nb;
         pbuffer->time_us = rlink->current_time_us;
         stream->egress_size += pbuffer->len;
+
+        packet->slink_size += SLINK_SIZE;
         hasStream = TRUE;
     }
     return hasStream;
@@ -853,7 +1077,7 @@ static BOOL stream_buffer_egress(pRCONNECTION connection, pESTREAM stream, cyg_u
  *  immediate ack在STREAM_ID_ACK1里面产生，当接收到的packet需要立即ACK的时候，接收端应该及早回应。
  *  RTT时长超过以后，需要ACK这个期间接收到的packet number.这个在STREAM_ID_ACK2里面产生。
  */
-BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 **pos, cyg_uint8 *end) {
+BOOL generator_ack(pRCONNECTION connection, pRPACKET packet, TYPE_STREAM_ID stream_id, cyg_uint8 **pos, cyg_uint8 *end) {
 	pRLINK rlink = connection->rlink;
     pPN_SPACE pn = &connection->pn_space;
 
@@ -871,7 +1095,8 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
 
     // TODO: we need at least stream-id + largest-pn + delay + range-cnt + ()
 
-    if((end - *pos) < (1 + sizeof(TYPE_PACKET_NUMBER) + sizeof(uint64_t) /* ack delay */+ sizeof(uint_t) /* range count */
+    if((end - *pos - packet->slink_size) < (1 + sizeof(TYPE_PACKET_NUMBER) +
+    		sizeof(uint64_t) /* ack delay */+ sizeof(uint_t) /* range count */
     		+ 2 * sizeof(uint64_t) /* One ACK range and One ACK Gap */)) {
     	fprintf(stderr, "no packet space for ACK%d\r\n", stream_id);
 	    return FALSE;
@@ -922,6 +1147,9 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
     		rlink->debug_prompt, rlink->isClient?"Client":"Server", stream_id, connection->packet_nb);
     prev_lo = 0;
     diet_foreach_rev (b, diet, &pn->recv) {
+
+    	// TODO: check space!
+
         uint_t gap = 0;
         if (prev_lo) {
             gap = prev_lo - b->hi - 2;
@@ -962,6 +1190,9 @@ BOOL generator_ack(pRCONNECTION connection, TYPE_STREAM_ID stream_id, cyg_uint8 
 
 // TODO: we should deliver LOST stream first somehow.
 static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
+    packet->len = 0;
+    packet->slink_size = 0;
+
 	pRLINK rlink = connection->rlink;
     // 模拟对端接收到报文后能够知道报文发送源地址。
     RLINK_ADDR_CPY(&packet->from_addr, &connection->local_addr);
@@ -971,8 +1202,7 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
     cyg_uint32  send_frm_types = 0;
 
     cyg_uint8 *pos = packet->buf;
-//    cyg_uint8 *end = packet->buf + packet->len;
-    cyg_uint8 *end = packet->buf + sizeof(packet->buf); //packet->len;
+    cyg_uint8 *end = packet->buf + sizeof(packet->buf);
 
     enc1(&pos, end, DEFAULT_HEADER_BYTE);
     encb(&pos, end, (const cyg_uint8 *)&connection->target_cid, sizeof(connection->target_cid));
@@ -980,23 +1210,25 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
 
     cyg_uint8 const *check_pos = pos;
 
-    if(stream_buffer_egress(connection, &connection->egress_streams[STREAM_ID_CRYPTO], &pos, end) == TRUE)
+    if(stream_buffer_egress(connection, packet, &connection->egress_streams[STREAM_ID_CRYPTO], &pos, end) == TRUE)
+    	//  考虑到接收端实现的简易性，预留Stream Linker Struct接收端
    		send_frm_types |= STREAM_EGRESS_ATTR[STREAM_ID_CRYPTO].type;
 
     // 我们用STREAM SLOT 1来传输 ACK需要理解发送的PN 信息
     // ACK数据需要每次进行更新，所以不能缓存在STREAM BUFFER之中。
     // TODO: 但是ACK for ACK需要记录ACK的数据
-   	if(generator_ack(connection, STREAM_ID_ACK1, &pos, end))
+   	if(generator_ack(connection, packet, STREAM_ID_ACK1, &pos, end))
    		send_frm_types |= STREAM_EGRESS_ATTR[STREAM_ID_ACK1].type;
 
     int stream_index;
     for(stream_index = 3; stream_index <= (sizeof(STREAM_EGRESS_ATTR)/sizeof(STREAM_EGRESS_ATTR[0])); stream_index++) {
         // 不应该被传输，原因之一是没有得到加密数据。
-        if(stream_buffer_egress(connection, &connection->egress_streams[stream_index], &pos, end) == TRUE)
+        if(stream_buffer_egress(connection, packet, &connection->egress_streams[stream_index], &pos, end) == TRUE)
+        	//  考虑到接收端实现的简易性，预留Stream Linker Struct接收端
        		send_frm_types |= STREAM_EGRESS_ATTR[stream_index].type;
     }
 
-    if(generator_ack(connection, STREAM_ID_ACK2, &pos, end))
+    if(generator_ack(connection, packet, STREAM_ID_ACK2, &pos, end))
     	send_frm_types |= STREAM_EGRESS_ATTR[STREAM_ID_ACK2].type;
 
     if(check_pos == pos)
@@ -1016,8 +1248,8 @@ static void connection_egress(pRCONNECTION connection, pRPACKET packet) {
 }
 
 // 生成需要发送的packet。
+// TODO: one connection with one packet!
 int rlink_egress(pRLINK link, pRPACKET packet) {
-    packet->len = 0;
     pRCONNECTION connection = link->connections_mgr.connection_header;
     for(; connection != NULL; connection = connection->next)
     {

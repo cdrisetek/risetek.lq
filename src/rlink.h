@@ -70,6 +70,13 @@ typedef enum {
 
 struct r_connection;
 
+struct SLinker {
+	void *packet;
+	cyg_uint16 soffset;
+} __attribute__ ((aligned(1), packed));
+
+#define SLINK_SIZE sizeof(struct SLinker)
+
 typedef struct r_packet {
     RLINK_ADDR from_addr;
     RLINK_ADDR to_addr;
@@ -81,6 +88,10 @@ typedef struct r_packet {
 
     //runtime
     int ref;
+    cyg_uint16 slink_size;
+
+    // ingress runtime
+    TYPE_STREAM_ID f_link_item; // free space for slinker storage.
 } RPACKET, *pRPACKET;
 
 typedef struct r_stream_buffer {
@@ -139,13 +150,17 @@ typedef struct in_stream {
     TYPE_STREAM_ID id;
     TYPE_STREAM_OFFSET offset;
     int avaliable_len;
-    pRSTREAM_BUFFER buffer_header;
+    // pRSTREAM_BUFFER buffer_header;
 
     // APPLICATION
     cyg_uint32 notify_event;
     cyg_uint32 interesting_event;
     // 应用层希望在给定时间点产生CONNECT_EVENT_TIMER事件
     TYPE_TIMER_US timer_interesting;
+
+    // PACKET remain style
+    struct SLinker slinker;
+	// End of PACKET remain style
 
     // Statistic
     TYPE_STREAM_OFFSET received_size;
