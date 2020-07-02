@@ -11,7 +11,7 @@
 #define FMT_PN         "%llu"
 #define FMT_SID        "%03d"
 
-#define MAINDEBUG 1
+#define MAINDEBUG 0
 
 #if MAINDEBUG
 #define LQ_DEBUG_PKT(fmt, args...) do{ fprintf(stderr, fmt, ##args); }while(0)
@@ -46,6 +46,8 @@
 #endif
 
 #define MARKLINE    fprintf(stderr, "%s %d\r\n", __FUNCTION__, __LINE__);
+#define CSPROMPT(l) (l->isClient?"Client":"Server")
+
 
 #define STREAM_ID_CRYPTO     0
 #define STREAM_ID_ACK1       1  /* 立即ACK */
@@ -55,6 +57,7 @@
 #define STREAM_HAS_OFFSET              (1 << 1)
 #define STREAM_HAS_LENGTH              (1 << 2)
 #define STREAM_HAS_BUFFER              (1 << 3)
+#define STREAM_HAS_SLINK               (1 << 4)
 #define STREAM_INGRESS_IMM_ACK         (1 << 5)
 #define STREAM_CORE                    (1 << 7)
 
@@ -150,6 +153,8 @@ typedef struct in_stream {
     TYPE_STREAM_ID id;
     TYPE_STREAM_OFFSET offset;
     int avaliable_len;
+    // data frame in packet leaves after read.
+    TYPE_STREAM_LENGTH leave_offset;
     // pRSTREAM_BUFFER buffer_header;
 
     // APPLICATION
@@ -211,6 +216,9 @@ typedef struct r_connection {
     // receive endpoints
     INSTREAM    ingress_streams[NUMBER_OF_STREAMS+1];
 
+    // receive endpoints
+    INSTREAM    ingress_core_streams[8];
+
     TYPE_PACKET_NUMBER packet_nb;
     pRPACKET received_packet_header;
 
@@ -255,6 +263,7 @@ typedef struct r_link {
 
     RPACKET  __packets[MAX_LINK_PACKETS];
     pRPACKET free_packets;
+    pRPACKET sending_packet_header;
 
     RSTREAM_BUFFER __stream_buffer[1000];
     pRSTREAM_BUFFER free_stream_header;
