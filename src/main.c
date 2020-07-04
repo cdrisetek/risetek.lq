@@ -57,7 +57,7 @@ static void sigroutine(int dunno) {
 }
 
 static BOOL islucky(void) {
-	return TRUE;
+//	return TRUE;
 	if(rand() < (RAND_MAX/100*50))
         return TRUE;
     return FALSE;
@@ -492,26 +492,20 @@ TYPE_TIMER_US getCurrentTimeUS(void) {
 
 static void rlink_test_loop(int sleep_sec) {
     int loop_times = 0;
+    pRLINK server, client;
 
-    pRLINK server;
-    pRLINK client;
-
-    RLINK_ADDR client_addr;
-    memset(client_addr.addr, 0x0, sizeof(client_addr.addr));
-    memcpy(client_addr.addr, "9999999999", sizeof("9999999999"));
-
-    // TODO: set remote addr.
+    // Create Server
     RLINK_ADDR server_addr;
     memset(server_addr.addr, 0x0, sizeof(server_addr.addr));
     memcpy(server_addr.addr, "1111111111", sizeof("1111111111"));
-
-    // Create Server
     server = rlink_create(FALSE, &server_addr);
-	server->current_time_us = getCurrentTimeUS();
     register_application(server, server_impl, NULL);
+
     // Create Client
+    RLINK_ADDR client_addr;
+    memset(client_addr.addr, 0x0, sizeof(client_addr.addr));
+    memcpy(client_addr.addr, "9999999999", sizeof("9999999999"));
     client = rlink_create(TRUE, &client_addr);
-	client->current_time_us = getCurrentTimeUS();
     register_application(client, application_impl, NULL);
 
     // get Client connection to Server, this trigger connect.
@@ -523,15 +517,13 @@ static void rlink_test_loop(int sleep_sec) {
 
     // LQ_DEBUG_CORE("--------------------- Loop: %d -------------------------------------\r\n", loop_times++);
 
+        // 模拟网络时间
+		client->current_time_us = getCurrentTimeUS();
+
 		// 清理stream中已经用完的stream buffer空间。
 		// 老化超过 RTT 的 stream_buffer
     	client->debug_prompt = "CLEAN";
 		rlink_cleanstream(client);
-
-		// 处理rlink的内部状态，因为定时事件，有新报文输入等原因，rlink需要调整自身的状态，
-        // 并在内部产生出等待发送的数据。
-    	client->debug_prompt = "SCHED";
-		// rlink_scheduler_core(client);
 
         // 处理rlink向上层（内部控制层、应用层）提交的数据。因为状态的变迁、收到新的报文等因素，
         // 内部stream存在需要上层处理的数据，需要通知、调用上层功能进行处理。
@@ -543,11 +535,6 @@ static void rlink_test_loop(int sleep_sec) {
 		// 组织这些数据到packet并发送到目的地。
 
 		for(;;) {
-			// clear
-	    	// memset(&packet, 0x0, sizeof(packet));
-			//packet.len = 0;
-			//packet.connection = NULL;
-
 			// 从client组织packet
 	    	client->debug_prompt = "EGRESS";
 			rlink_egress(client, &packet);
@@ -570,25 +557,17 @@ static void rlink_test_loop(int sleep_sec) {
 			}
 		}
 
-        // 模拟网络时间
-		client->current_time_us = getCurrentTimeUS();
+		// 模拟网络时间
+		server->current_time_us = getCurrentTimeUS();
 
 		// 清理stream中已经用完的stream buffer空间。
     	server->debug_prompt = "CLEAN";
 		rlink_cleanstream(server);
 
-    	server->debug_prompt = "SCHED";
-		// rlink_scheduler_core(server);
-
     	server->debug_prompt = "UPSTREAM";
 		rlink_upstream(server);
 
 		for(;;) {
-			// clear
-	    	//memset(&packet, 0x0, sizeof(packet));
-			//packet.len = 0;
-			//packet.connection = NULL;
-
 	    	server->debug_prompt = "EGRESS";
 			rlink_egress(server, &packet);
 			if(0 == packet.len)
@@ -605,9 +584,6 @@ static void rlink_test_loop(int sleep_sec) {
 			}
 			else packet.connection->lost_packet++;
 		}
-
-		// 模拟网络时间
-		server->current_time_us = getCurrentTimeUS();
 
 		if(sleep_sec)
 			sleep(sleep_sec);

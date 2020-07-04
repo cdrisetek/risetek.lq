@@ -75,7 +75,7 @@ struct r_connection;
 
 struct SLinker {
 	void *packet;
-	cyg_uint16 soffset;
+	TYPE_BUFFER_SIZE soffset;
 } __attribute__ ((aligned(1), packed));
 
 #define SLINK_SIZE sizeof(struct SLinker)
@@ -86,7 +86,7 @@ typedef struct r_packet {
     struct r_packet *next;
     struct r_connection *connection;
 
-    int len;
+    int len;    // TODO: should be size.
     cyg_uint8  buf[1500];
 
     //runtime
@@ -103,11 +103,6 @@ typedef struct r_stream_buffer {
     TYPE_BUFFER_SIZE size;
 
     cyg_uint8 buffer[1500];
-
-    // 接收处理
-    pRPACKET packet;
-    const cyg_uint8 *packet_pos;
-    int packet_stream_len;
 
     /**
      * 待发送的stream buffer数据需要有状态可以识别，设计packet_nb基于以下考虑：
@@ -131,7 +126,6 @@ typedef struct e_stream {
     pRSTREAM_BUFFER buffer_header;
 
     // APPLICATION
-    cyg_uint32 notify_event;
     cyg_uint32 interesting_event;
     // 应用层希望在给定时间点产生CONNECT_EVENT_TIMER事件
     TYPE_TIMER_US timer_interesting;
@@ -139,14 +133,12 @@ typedef struct e_stream {
     // eStream CC
     TYPE_STREAM_OFFSET max_pending_size;
     TYPE_STREAM_OFFSET pending_size;
-    TYPE_STREAM_OFFSET naked_bytes;
-    TYPE_STREAM_OFFSET naked_frames;
-    TYPE_STREAM_OFFSET timeout_bytes;
-    TYPE_STREAM_OFFSET timeout_frames;
 
     // Statistic
     TYPE_STREAM_OFFSET sended_size;
     TYPE_STREAM_OFFSET egress_size;
+    TYPE_STREAM_OFFSET timeout_bytes;
+    TYPE_STREAM_OFFSET timeout_frames;
 } ESTREAM, *pESTREAM;
 
 typedef struct in_stream {
@@ -154,18 +146,12 @@ typedef struct in_stream {
     TYPE_STREAM_OFFSET offset;
     int avaliable_len;
     // data frame in packet leaves after read.
-    TYPE_STREAM_LENGTH leave_offset;
-    // pRSTREAM_BUFFER buffer_header;
+    TYPE_STREAM_LENGTH consumer_length;
 
     // APPLICATION
-    cyg_uint32 notify_event;
     cyg_uint32 interesting_event;
-    // 应用层希望在给定时间点产生CONNECT_EVENT_TIMER事件
-    TYPE_TIMER_US timer_interesting;
 
-    // PACKET remain style
     struct SLinker slinker;
-	// End of PACKET remain style
 
     // Statistic
     TYPE_STREAM_OFFSET received_size;
@@ -194,7 +180,7 @@ typedef struct pn_space {
 #define CONNECTION_EVENT_TIMER                     (1 << EVENT_ID_TIMER)
 
 struct ingress_crypto_stream_priv {
-	int offset;
+	int state;
 };
 
 typedef struct r_connection {
@@ -215,9 +201,6 @@ typedef struct r_connection {
 
     // receive endpoints
     INSTREAM    ingress_streams[NUMBER_OF_STREAMS+1];
-
-    // receive endpoints
-    INSTREAM    ingress_core_streams[8];
 
     TYPE_PACKET_NUMBER packet_nb;
     pRPACKET received_packet_header;
